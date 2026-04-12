@@ -1,2 +1,2 @@
 # scsi
-Self Consistent Stochastic Interpolants implementation
+Implementation of "Self Consistent Stochastic Interpolants".
