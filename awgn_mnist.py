@@ -258,7 +258,7 @@ def update_prior(model, y_obs, n_steps=50, batch_size=512):
     result_gpu = torch.empty(N, 1, 28, 28, device=DEVICE)
     y_gpu = y_obs.to(DEVICE)
 
-    for start in range(0, N, batch_size):
+    for start in tqdm(range(0, N, batch_size), desc="  M-step", leave=False):
         end = min(start + batch_size, N)
         x_batch = sample_midpoint(model, y_gpu[start:end], n_steps=n_steps)
         result_gpu[start:end] = x_batch
@@ -327,7 +327,7 @@ def main():
     # ── Hyperparameters ───────────────────────────────────────────────
     sigma_noise = 0.8
     n_em_steps = 5
-    epochs_per_em = 10
+    epochs_per_em = 1
     sample_steps = 50
     batch_size = 256
     lr = 3e-4

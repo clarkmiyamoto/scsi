@@ -1,0 +1,31 @@
+\documentclass[aspectratio=169]{beamer}
+
+\usetheme{Berlin} % try: CambridgeUS, Berkeley, Metropolis (if installed)
+\usefonttheme{professionalfonts} % or: serif
+
+\usepackage{twemojis}
+
+\newenvironment{help}{
+  \begin{alertblock}{\texttwemoji{thinking}\texttwemoji{shrug}:}
+}{
+  \end{alertblock}
+}
+\useoutertheme{miniframes}
+
+\title{SCSI Updates}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}
+    {Consistency Model for SCSI}
+    In the \texttt{two moons AWGN} problem, 96\% of the wall-clock time is spent on $\Phi_{\Theta^{(k)}}(z | y)$ (assuming 64 steps in Heun solver). This compute can be  amortized by replacing the model with a consistency model.
+
+    Runs twice as fast,
+\end{frame}
+
+\end{document}

@@ -278,7 +278,7 @@ def update_prior(model, y_obs, n_steps=50, batch_size=512):
     result_gpu = torch.empty(N, 1, 28, 28, device=DEVICE)
     y_gpu = y_obs.to(DEVICE)
 
-    for start in range(0, N, batch_size):
+    for start in tqdm(range(0, N, batch_size), desc="  M-step", leave=False):
         end = min(start + batch_size, N)
         x_batch = sample_midpoint(model, y_gpu[start:end], n_steps=n_steps)
         result_gpu[start:end] = x_batch
@@ -349,13 +349,19 @@ def main():
     print(f"Device: {DEVICE}\n")
 
     # ── Hyperparameters ───────────────────────────────────────────────
+    # Pro
     sigma_noise = 0.5
+
+    # EM
     n_em_steps = 3
-    epochs_per_em = 20
+    epochs_per_em = 35
+    first_pass_epochs = 100
     sample_steps = 50
+
+    # Training
     batch_size = 256
     lr = 3e-4
-    n_obs = 50_000
+    n_obs = 2_000 # Number of observations, instead of full dataset
 
     # ── Generate fixed observations ──────────────────────────────────
     transform = transforms.ToTensor()
@@ -376,6 +382,7 @@ def main():
     print(f"Observations:  {y_obs.shape[0]}")
     print(f"Channel:       MRA (shift + AWGN)  σ={sigma_noise}")
     print(f"EM steps:      {n_em_steps}")
+    print(f"Epochs (pass 0): {first_pass_epochs}")
     print(f"Epochs / step: {epochs_per_em}\n")
 
     # ── Model ─────────────────────────────────────────────────────────
@@ -411,10 +418,11 @@ def main():
 
         # E-step: fresh model, train on current prior
         model = CleanUNet(base_ch=64, t_dim=128).to(DEVICE)
+        current_epochs = first_pass_epochs if k == 0 else epochs_per_em
 
         train_conditional(
             model, x_pool, sigma=sigma_noise,
-            epochs=epochs_per_em, batch_size=batch_size, lr=lr,
+            epochs=current_epochs, batch_size=batch_size, lr=lr,
         )
 
         # Save checkpoint
@@ -428,7 +436,7 @@ def main():
         # M-step
         print(f"  M-step: sampling π({k+1}) ...")
         x_pool = update_prior(model, y_obs, n_steps=sample_steps,
-                              batch_size=512)
+                              batch_size=min(1024, n_obs))
         prior_history.append(x_pool.clone())
         sigma_k = estimate_noise_mad(x_pool)
         print(f"  π({k+1}) mean={x_pool.mean():.4f}  std={x_pool.std():.4f}"

@@ -1,0 +1,70 @@
+\documentclass{article}
+\usepackage{amsmath, amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% ── notation shortcuts ──────────────────────────────────────────────────────
+\newcommand{\Xmap}[3]{X^{#1}_{#2 \to #3}}   % \Xmap{\theta}{s}{t}
+\newcommand{\Fcorr}{\mathcal{F}}              % forward corruption
+\newcommand{\Lcm}{\mathcal{L}_{\mathrm{cm}}}
+\newcommand{\Lor}{\mathcal{L}_{\mathrm{or}}}
+\newcommand{\ycond}{y_{\mathrm{cond}}}
+\newcommand{\yreal}{y_{\mathrm{real}}}
+\newcommand{\yfake}{y_{\mathrm{fake}}}
+\newcommand{\xfake}{x_{\mathrm{fake}}}
+\newcommand{\xclean}{x_{\mathrm{clean}}}
+
+\begin{document}
+
+\begin{algorithm}
+\caption{Lifted SCSI EM with Conditional Flow Map Parameterization}
+\label{alg:lifted-cm}
+\begin{algorithmic}[1]
+\Require
+  Data sampler $p_{\mathrm{data}}$;\;
+  forward corruption $\Fcorr(x) = x + \sigma\varepsilon$, $\varepsilon\sim\mathcal{N}(0,I)$;
+  outer iterations $K$;\; inner iterations $N$;\;
+  batch size $B$;\;
+
+\State \textbf{Initialize} flow-map parameters $\theta$
+\State $\phi \leftarrow \theta$ \Comment{frozen generator (copy of $\theta$, no grad)}
+
+\For{$k = 1, \ldots, K$} \Comment{outer EM iterations}
+  \For{$i = 1, \ldots, N$} \Comment{inner gradient steps}
+
+    \State Sample $z, z' \sim \mathcal{N}(0,I)^{B}$;\;
+           $s,t,t' \sim \mathcal{U}[0,1]^{B}$
+
+    \State Sample $\yreal \sim p_{\mathrm{obs}}^{B}$
+    \Statex
+
+    \State \textbf{E-step} (no grad).
+    \State \quad $\xfake = \Xmap{\phi}{0}{1}(z \mid \yreal)$
+           \hfill\textit{(single forward pass through frozen $\phi$)}
+
+    \State \quad $\yfake \leftarrow \Fcorr(\xfake)$
+
+    \State \quad Compute $I_{t'} \leftarrow (1 - t')\,z' + t'\,\xfake$ and $\dot I_{t'} \leftarrow \xfake - z'$
+           
+    \Statex
+    \State \textbf{M-step.} Compute the loss and update $\theta$:
+    \State \quad $\tilde{x} := \Xmap{\theta}{t}{s}(I_{t} \mid \yfake)$
+    \State \quad $\begin{aligned}[t]
+      \Lcm(\theta) ={}& \left\|
+        \frac{d}{dt}\Xmap{\theta}{s}{t}(\tilde{x} \mid \yfake) - \dot I_{t}
+      \right\|^{2} + \left\|
+        \Xmap{\theta}{s}{t}(\tilde{x} \mid \yfake) - I_{t}
+      \right\|^{2}.
+    \end{aligned}$
+    \State \quad $\theta \leftarrow \theta - \eta_{\theta}\,\nabla_{\theta}\,\Lcm$
+
+  \EndFor
+  \State $\phi \leftarrow \theta$
+         \Comment{update frozen generator after each outer iteration}
+\EndFor
+
+\State \Return $\theta$ \Comment{trained conditional flow map}
+\end{algorithmic}
+\end{algorithm}
+
+\end{document}

@@ -1,9 +1,15 @@
+# UV
+
+
 # Weights & Biases
 wandb/
 
 # Downloaded datasets
 data/
 outputs/
+checkpoints*
+priors*
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
