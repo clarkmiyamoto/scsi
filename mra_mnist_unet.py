@@ -354,17 +354,17 @@ def main():
     print(f"Device: {DEVICE}\n")
 
     # ── Hyperparameters ───────────────────────────────────────────────
-    # Pro
+    # Problem
     sigma_noise = 0.5
 
     # EM
-    n_em_steps = 3
-    epochs_per_em = 35
-    first_pass_epochs = 100
+    n_em_steps = 1
+    epochs_per_em = 0
+    first_pass_epochs = 600
     sample_steps = 50
 
     # Training
-    batch_size = 256
+    batch_size = 516
     lr = 3e-4
     n_obs = 2_000 # Number of observations, instead of full dataset
 

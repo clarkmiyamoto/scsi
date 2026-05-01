@@ -10,6 +10,7 @@ dependencies = [
     "torch",
     "torchvision",
     "wandb>=0.26.1",
+    "scikit-learn>=1.8.0",
 ]
 
 [tool.uv.sources]
@@ -31,3 +32,8 @@ explicit = true
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]
