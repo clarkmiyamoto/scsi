@@ -57,6 +57,7 @@ from sklearn.datasets import make_moons
 # --------------------------------------------------------------------------- #
 def pick_device() -> torch.device:
     if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
         return torch.device("cuda")
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         return torch.device("mps")
@@ -454,9 +455,12 @@ def train(
             if on_log is not None:
                 on_log(it, loss.item(), model)
 
-        # Keep MPS memory tidy on smaller Macs.
-        if device.type == "mps" and it % 1000 == 0:
-            torch.mps.empty_cache()
+        # Keep device memory tidy.
+        if it % 1000 == 0:
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            elif device.type == "mps":
+                torch.mps.empty_cache()
 
     if n_skipped:
         print(f"\n  total non-finite steps skipped: {n_skipped} / {n_iters}")

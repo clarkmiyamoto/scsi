@@ -207,7 +207,7 @@ def train_conditional(model, x_pool, sigma, epochs=10, batch_size=256, lr=3e-4,
     loader = DataLoader(
         TensorDataset(x_pool),
         batch_size=batch_size, shuffle=True,
-        num_workers=0, pin_memory=False, drop_last=True,
+        num_workers=0, pin_memory=(DEVICE.type == "cuda"), drop_last=True,
     )
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4, eps=1e-8)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -242,7 +242,9 @@ def train_conditional(model, x_pool, sigma, epochs=10, batch_size=256, lr=3e-4,
         skip_str = f"  ({n_skipped} skipped)" if n_skipped else ""
         print(f"    epoch {epoch:2d}  |  loss = {avg:.5f}{skip_str}")
 
-    if DEVICE.type == "mps":
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
+    elif DEVICE.type == "mps":
         torch.mps.empty_cache()
 
 
@@ -269,7 +271,9 @@ def update_prior(model, y_obs, n_steps=5, batch_size=512):
     print(f"    pre-normalisation: mean={mu:.4f}, std={std:.4f}")
     result = (result - mu) / std.clamp(min=1e-6)
 
-    if DEVICE.type == "mps":
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
+    elif DEVICE.type == "mps":
         torch.mps.empty_cache()
     return result
 

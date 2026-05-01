@@ -10,7 +10,7 @@ Uses the same standard U-Net architecture as the AWGN variant
 EM iteration can make progress on the harder MRA inverse problem
 without architectural symmetry constraints.
 
-Optimised for Apple Silicon MPS.
+Supports CUDA, Apple Silicon MPS, and CPU.
 """
 
 import math
@@ -31,12 +31,13 @@ except ImportError:
         return iterable
 
 # ──────────────────────────────────────────────────────────────────────
-# Device
+# Device  (CUDA > MPS > CPU)
 # ──────────────────────────────────────────────────────────────────────
-if torch.backends.mps.is_available():
-    DEVICE = torch.device("mps")
-elif torch.cuda.is_available():
+if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
+    torch.backends.cudnn.benchmark = True
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
 else:
     DEVICE = torch.device("cpu")
 
@@ -231,7 +232,7 @@ def train_conditional(model, x_pool, sigma, epochs=10, batch_size=256,
     loader = DataLoader(
         TensorDataset(x_pool),
         batch_size=batch_size, shuffle=True,
-        num_workers=0, pin_memory=False, drop_last=True,
+        num_workers=0, pin_memory=(DEVICE.type == "cuda"), drop_last=True,
     )
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -256,7 +257,9 @@ def train_conditional(model, x_pool, sigma, epochs=10, batch_size=256,
         avg = running / len(loader)
         print(f"    epoch {epoch:2d}  |  loss = {avg:.5f}")
 
-    if DEVICE.type == "mps":
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
+    elif DEVICE.type == "mps":
         torch.mps.empty_cache()
 
 
@@ -286,7 +289,9 @@ def update_prior(model, y_obs, n_steps=50, batch_size=512):
     result = result_gpu.cpu()
     del result_gpu, y_gpu
 
-    if DEVICE.type == "mps":
+    if DEVICE.type == "cuda":
+        torch.cuda.empty_cache()
+    elif DEVICE.type == "mps":
         torch.mps.empty_cache()
     return result
 
