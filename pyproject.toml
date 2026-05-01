@@ -10,6 +10,9 @@ dependencies = [
     "torch",
     "torchvision",
     "wandb>=0.26.1",
+    "transformers>=5.7.0",
+    "accelerate>=1.13.0",
+    "diffusers>=0.37.1",
 ]
 
 [tool.uv.sources]
