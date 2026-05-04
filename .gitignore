@@ -1,5 +1,6 @@
-# UV
-
+# Ouptuts
+*.png
+*.out
 
 # Weights & Biases
 wandb/
