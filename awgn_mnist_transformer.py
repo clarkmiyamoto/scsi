@@ -120,6 +120,31 @@ def flow_matching_loss(model: nn.Module, x: torch.Tensor,
     pred = model(x_t, t_dit, y)
     return F.mse_loss(pred, velocity)
 
+@torch.no_grad()
+def sample(model: nn.Module, y: torch.Tensor,
+           n_steps: int = 50, method: str = "euler") -> torch.Tensor:
+    model.eval()
+    B = y.size(0)
+    if method == "euler":
+        return sample_euler(model, y, n_steps)
+    elif method == "midpoint":
+        return sample_midpoint(model, y, n_steps)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+@torch.no_grad()
+def sample_euler(model: nn.Module, y: torch.Tensor,
+                 n_steps: int = 50) -> torch.Tensor:
+    model.eval()
+    B = y.size(0)
+    x = torch.randn(B, 1, IMAGE_SIZE, IMAGE_SIZE, device=y.device)
+    dt = 1.0 / n_steps
+    for i in range(n_steps):
+        t_val = i * dt 
+        t1 = torch.full((B,), t_val * 999, device=y.device).long()
+        v1 = model(x, t1, y)
+        x = x + v1 * dt
+    return x
 
 @torch.no_grad()
 def sample_midpoint(model: nn.Module, y: torch.Tensor,
@@ -137,7 +162,7 @@ def sample_midpoint(model: nn.Module, y: torch.Tensor,
         t2 = torch.full((B,), (t_val + dt / 2.0) * 999, device=y.device).long()
         v2 = model(x_mid, t2, y)
         x = x + v2 * dt
-    return x.clamp(-1.0, 1.0)
+    return x
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -186,14 +211,14 @@ def train_estep(model: nn.Module, x_pool: torch.Tensor,
 # ══════════════════════════════════════════════════════════════════════
 @torch.no_grad()
 def update_prior(model: nn.Module, y_obs: torch.Tensor,
-                 n_steps: int = 50, batch_size: int = 256) -> torch.Tensor:
+                 n_steps: int = 50, batch_size: int = 256, method: str = "euler") -> torch.Tensor:
     model.eval()
     N = y_obs.size(0)
     chunks = []
     y_gpu = y_obs.to(device)
     for start in tqdm(range(0, N, batch_size), desc="  M-step", leave=False):
         end = min(start + batch_size, N)
-        x_batch = sample_midpoint(model, y_gpu[start:end], n_steps=n_steps)
+        x_batch = sample(model, y_gpu[start:end], n_steps=n_steps, method=method)
         chunks.append(x_batch.cpu())
 
     result = torch.cat(chunks, dim=0)
@@ -210,34 +235,73 @@ def update_prior(model: nn.Module, y_obs: torch.Tensor,
 # ══════════════════════════════════════════════════════════════════════
 # 6.  Visualisation
 # ══════════════════════════════════════════════════════════════════════
+import matplotlib.pyplot as plt
+import torch
+
 def visualize_em(y_obs: torch.Tensor, x_gt: torch.Tensor,
                  prior_history: list, corruption: str,
                  n: int = 8, path: str = "scsi_results.png"):
+    
     def to_img(t):
-        lo, hi = t.min(), t.max()
-        if hi - lo < 1e-8:
-            return torch.zeros_like(t)
-        return (t - lo) / (hi - lo)
+        # lo, hi = t.min(), t.max()
+        # if hi - lo < 1e-8:
+        #     return torch.zeros_like(t)
+        # return (t - lo) / (hi - lo)
+        return t
 
     n_rows = 2 + len(prior_history)
-    fig, axes = plt.subplots(n_rows, n, figsize=(2 * n, 2.2 * n_rows))
+    
+    # Increase columns by 1 to accommodate the histogram column
+    fig, axes = plt.subplots(n_rows, n + 1, figsize=(2 * n + 3, 2.2 * n_rows))
 
+    # Vmin and vmax for the ground truth
+    y_obs_slice = to_img(y_obs[:n, 0])
+    vmin = float(y_obs_slice.min())
+    vmax = float(y_obs_slice.max())
+    if vmax - vmin < 1e-8:
+        vmax = vmin + 1e-8
+
+    # --- Ground Truth (Row 0) ---
+    gt_data = []
     for j in range(n):
-        axes[0, j].imshow(to_img(x_gt[j, 0]), cmap="gray", vmin=0, vmax=1)
+        img = to_img(x_gt[j, 0])
+        axes[0, j].imshow(img.cpu().numpy(), cmap="gray", vmin=vmin, vmax=vmax)
         axes[0, j].axis("off")
+        gt_data.append(img)
+        
     axes[0, 0].set_ylabel("GT  X", fontsize=10)
+    
+    # Plot GT Histogram on the last column
+    axes[0, n].hist(torch.stack(gt_data).cpu().numpy().flatten(), bins=50, color='black', alpha=0.7)
+    axes[0, n].set_title("Intensity Dist.", fontsize=10)
+    axes[0, n].set_yticks([]) # Hide y-ticks to keep it clean
 
+    # --- Observation (Row 1) ---
+    obs_data = []
     for j in range(n):
-        axes[1, j].imshow(to_img(y_obs[j, 0]), cmap="gray", vmin=0, vmax=1)
+        img = to_img(y_obs[j, 0])
+        axes[1, j].imshow(img.cpu().numpy(), cmap="gray", vmin=vmin, vmax=vmax)
         axes[1, j].axis("off")
+        obs_data.append(img)
+        
     axes[1, 0].set_ylabel("Obs  Y", fontsize=10)
+    # Plot Obs Histogram
+    axes[1, n].hist(torch.stack(obs_data).cpu().numpy().flatten(), bins=50, color='black', alpha=0.7)
+    axes[1, n].set_yticks([])
 
+    # --- Prior History (Rows 2+) ---
     for k, x_pool in enumerate(prior_history):
+        pool_data = []
         for j in range(n):
-            axes[2 + k, j].imshow(
-                to_img(x_pool[j, 0]), cmap="gray", vmin=0, vmax=1)
+            img = to_img(x_pool[j, 0])
+            axes[2 + k, j].imshow(img.cpu().numpy(), cmap="gray", vmin=vmin, vmax=vmax)
             axes[2 + k, j].axis("off")
+            pool_data.append(img)
+            
         axes[2 + k, 0].set_ylabel(f"π({k})", fontsize=10)
+        # Plot Prior History Histogram
+        axes[2 + k, n].hist(torch.stack(pool_data).cpu().numpy().flatten(), bins=50, color='black', alpha=0.7)
+        axes[2 + k, n].set_yticks([])
 
     fig.suptitle(f"SCSI Transformer — MNIST ({corruption} channel)", fontsize=13)
     plt.tight_layout()
@@ -245,20 +309,27 @@ def visualize_em(y_obs: torch.Tensor, x_gt: torch.Tensor,
     plt.close()
     print(f"Saved → {path}")
 
-
 # ══════════════════════════════════════════════════════════════════════
 # 7.  Main
 # ══════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    # Problem parameter
     corruption   = "awgn"
     noise_std    = 0.3
-    n_em_steps   = 5
-    epochs_per_em = 5
+    n_obs        = 10_000 # Number of observations, instead of full dataset
+
+    # SCSI parameters
+    n_em_steps   = 20
+    epochs_per_em = 2
+    epochs_first_pass = 10
+    sample_method = "euler" # "euler" or "midpoint"
     sample_steps = 50
+    fresh_model_every_em_step = False
+
+    # Training parameters
     batch_size   = 256
     lr           = 3e-4
-    n_obs        = 10_000
-
+    
     print(f"Device: {device}")
     print(f"Channel: {corruption},  noise_std={noise_std}")
     print(f"EM steps: {n_em_steps},  epochs/step: {epochs_per_em}\n")
@@ -283,8 +354,10 @@ if __name__ == "__main__":
     x_pool = y_obs.clone()
     prior_history = [x_pool[:8].clone()]
 
-    ckpt_dir = Path(f"checkpoints_scsi_{corruption}")
+    ckpt_dir = Path(f"checkpoints_{corruption}_mnist_transformer")
+    prior_dir = Path(f"priors_{corruption}_mnist_transformer")
     ckpt_dir.mkdir(exist_ok=True)
+    prior_dir.mkdir(exist_ok=True)
 
     # ── EM loop ───────────────────────────────────────────────────────
     for k in range(n_em_steps):
@@ -292,28 +365,36 @@ if __name__ == "__main__":
         print(f"EM iteration {k}")
         print("=" * 60)
 
+        # Save prior for diagnostics
+        torch.save(x_pool, prior_dir / f"prior_em{k:02d}.pt")
+
         # Fresh model each EM step (following SCSI paper)
-        model = ConditionalDiT().to(device)
+        if k==0 or fresh_model_every_em_step:
+            model = ConditionalDiT().to(device)
+            print(f"Using fresh model")
+        else:
+            model = model
+        
         if k == 0:
             n_params = sum(p.numel() for p in model.parameters())
             print(f"Parameters: {n_params:,}\n")
 
         # E-step
+        epochs = epochs_first_pass if k == 0 else epochs_per_em
         train_estep(model, x_pool, noise_std=noise_std, corruption=corruption,
-                    epochs=epochs_per_em, batch_size=batch_size, lr=lr)
-
+                    epochs=epochs, batch_size=batch_size, lr=lr)
         torch.save(model.state_dict(), ckpt_dir / f"model_em{k:02d}.pt")
         print(f"  ✓ saved checkpoint")
 
         # M-step
-        print(f"  M-step: sampling π({k+1}) ...")
+        print(f"\n  M-step: sampling π({k+1}) ...")
         x_pool = update_prior(model, y_obs, n_steps=sample_steps,
-                              batch_size=batch_size)
+                              batch_size=batch_size*3, method=sample_method)
         prior_history.append(x_pool[:8].clone())
 
     # ── Visualise ─────────────────────────────────────────────────────
     visualize_em(
         y_obs, x_gt_all, prior_history, corruption=corruption,
-        n=8, path=f"scsi_{corruption}_results.png",
+        n=8, path=f"{corruption}_mnist_transformer_results.png",
     )
     print("Done.")
