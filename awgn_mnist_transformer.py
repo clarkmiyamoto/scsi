@@ -288,7 +288,7 @@ if __name__ == "__main__":
     n_obs        = 10_000 # Number of observations, instead of full dataset
 
     # SCSI parameters
-    n_em_steps   = 20
+    n_em_steps   = 100
     epochs_per_em = 2
     epochs_first_pass = 10
     sample_method = "euler" # "euler" or "midpoint"

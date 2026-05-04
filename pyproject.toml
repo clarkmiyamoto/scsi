@@ -10,13 +10,9 @@ dependencies = [
     "torch",
     "torchvision",
     "wandb>=0.26.1",
-<<<<<<< HEAD
-    "scikit-learn>=1.8.0",
-=======
     "transformers>=5.7.0",
     "accelerate>=1.13.0",
     "diffusers>=0.37.1",
->>>>>>> 717fc06cda1d099a3c99bffcf1b65117745e6a26
 ]
 
 [tool.uv.sources]
