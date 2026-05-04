@@ -292,6 +292,12 @@ if __name__ == "__main__":
         help="Forward channel: awgn (Y=X+noise) or mra (random 2-D shift + noise)",
     )
     parser.add_argument(
+        "--n_em_steps",
+        type=int,
+        default=200,
+        help="Number of EM steps",
+    )
+    parser.add_argument(
         "--epochs_per_em",
         type=int,
         default=2,
@@ -312,7 +318,7 @@ if __name__ == "__main__":
     n_obs        = 10_000 # Number of observations, instead of full dataset
 
     # SCSI parameters
-    n_em_steps   = 100
+    n_em_steps   = args.n_em_steps
     epochs_per_em = args.epochs_per_em
     epochs_first_pass = args.epochs_first_pass
     sample_method = "euler" # "euler" or "midpoint"
