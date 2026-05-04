@@ -253,7 +253,8 @@ def log_em_step_wandb(x_gt: torch.Tensor, y_obs: torch.Tensor,
     if vmax - vmin < 1e-8:
         vmax = vmin + 1e-8
 
-    fig, axes = plt.subplots(3, n, figsize=(2 * n, 6))
+    # n image columns + 1 histogram column
+    fig, axes = plt.subplots(3, n + 1, figsize=(2 * (n + 1), 6))
     rows = [
         (x_gt[:n, 0].cpu(),   "GT  X"),
         (y_obs[:n, 0].cpu(),  "Obs F(X)"),
@@ -263,15 +264,17 @@ def log_em_step_wandb(x_gt: torch.Tensor, y_obs: torch.Tensor,
         axes[r, 0].set_ylabel(label, fontsize=10)
         for j in range(n):
             axes[r, j].imshow(data[j].numpy(), cmap="gray", vmin=vmin, vmax=vmax)
-
-            # Hide tick marks and tick labels instead of the whole axis
             axes[r, j].set_xticks([])
             axes[r, j].set_yticks([])
-            
-            # Optional: If you also want to remove the black box/border 
-            # around the image to perfectly mimic axis("off"):
             for spine in axes[r, j].spines.values():
                 spine.set_visible(False)
+
+        # Histogram over all pixels in this row's n samples
+        hist_ax = axes[r, n]
+        hist_ax.hist(data.numpy().ravel(), bins=50, color="steelblue", edgecolor="none")
+        hist_ax.set_xlim(vmin, vmax)
+        hist_ax.tick_params(axis="both", labelsize=7)
+        hist_ax.set_yticks([])
 
     fig.suptitle(f"EM step {em_step}", fontsize=12)
     plt.tight_layout()
