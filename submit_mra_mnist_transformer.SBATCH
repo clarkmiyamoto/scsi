@@ -12,4 +12,4 @@ TARGET_FILE=awgn_mnist_transformer.py
 
 cd /scratch/cm6627/$REPO_DIR
 
-uv run $TARGET_FILE --corruption=awgn --epochs_per_em=2 --epochs_first_pass=10
+uv run $TARGET_FILE --corruption=mra --epochs_per_em=2 --epochs_first_pass=150
