@@ -1,9 +1,12 @@
 """
-Conditional Diffusion Transformer for MNIST denoising.
+Conditional Stochastic-Interpolant Transformer for MNIST denoising.
 
 Setup: noisy MNIST image  -->  clean MNIST image
-The conditioning image is concatenated channel-wise with the noisy latent
-at each diffusion step.
+Interpolant: I_t = (1-t)*Z + t*X,  t in [0,1]
+  Z ~ N(0,I) (noise), X = clean image
+Velocity target: dI_t/dt = X - Z  (constant along each path)
+Model learns v_theta(I_t, t, cond) and inference integrates dx/dt = v_theta
+from t=0 to t=1 with Euler steps.
 
 Requirements:
     pip install torch torchvision diffusers accelerate
@@ -14,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from diffusers import DiTTransformer2DModel, DDPMScheduler
+from diffusers import DiTTransformer2DModel
 
 device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -36,7 +39,7 @@ class NoisyMNIST(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.base)
-    
+
     def __getitem__(self, idx):
         if self.corruption == "awgn":
             return self.awgn(idx)
@@ -48,7 +51,7 @@ class NoisyMNIST(torch.utils.data.Dataset):
         clean, _ = self.base[idx]
         noisy = clean + self.noise_std * torch.randn_like(clean)
         return noisy, clean
-    
+
     def mra(self, idx):
         clean, _ = self.base[idx]
         # Uniform random 2D translation with periodic boundary conditions.
@@ -63,31 +66,29 @@ class NoisyMNIST(torch.utils.data.Dataset):
 
 
 # ---------- 2. Model: DiT with channel-concat conditioning ----------
-# Trick: DiT expects `in_channels` input. We feed it 2 channels:
-#   channel 0 = current noisy latent x_t  (the thing being denoised)
-#   channel 1 = conditioning image        (the noisy MNIST we want to clean)
-# At inference, channel 1 stays fixed across all diffusion steps.
+# DiT expects `in_channels` input. We feed it 2 channels:
+#   channel 0 = interpolated sample I_t
+#   channel 1 = conditioning image (the noisy MNIST we want to clean)
+# At inference, channel 1 stays fixed across all integration steps.
 class ConditionalDiT(nn.Module):
     def __init__(self, image_size=32, patch_size=4, hidden=192, depth=6, heads=6):
         super().__init__()
         self.dit = DiTTransformer2DModel(
             sample_size=image_size,
             patch_size=patch_size,
-            in_channels=2,              # noisy latent + condition
-            out_channels=1,             # predicting noise for the 1-channel target
+            in_channels=2,              # interpolated sample + condition
+            out_channels=1,             # predicting velocity for the 1-channel target
             num_layers=depth,
             num_attention_heads=heads,
             attention_head_dim=hidden // heads,
-            num_embeds_ada_norm=1000,   # diffusion timesteps
+            num_embeds_ada_norm=1000,   # t in [0,1] scaled to [0,999]
         )
 
     def forward(self, x_t, t, cond):
-        # x_t:   (B, 1, H, W) -- current noisy sample in the diffusion chain
-        # cond:  (B, 1, H, W) -- the noisy MNIST we are conditioning on
-        # t:     (B,)         -- diffusion timestep
+        # x_t:  (B, 1, H, W) -- interpolated sample I_t
+        # cond: (B, 1, H, W) -- conditioning noisy MNIST
+        # t:    (B,)         -- timestep in [0, 999] (long)
         inp = torch.cat([x_t, cond], dim=1)            # (B, 2, H, W)
-        # DiT uses class_labels for adaLN conditioning; we pass dummy zeros
-        # since our conditioning is via the concat'd channel, not class info.
         dummy_class = torch.zeros(x_t.size(0), dtype=torch.long, device=x_t.device)
         return self.dit(inp, timestep=t, class_labels=dummy_class).sample
 
@@ -99,24 +100,26 @@ def train(epochs=10, batch_size=128, lr=1e-4, device=device, noise_std=0.3, corr
 
     model = ConditionalDiT().to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
-    scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
 
     model.train()
     for epoch in range(epochs):
         for step, (noisy_cond, clean) in enumerate(loader):
-            noisy_cond = noisy_cond.to(device)   # the conditioning input
-            clean = clean.to(device)             # the target we want to recover
+            noisy_cond = noisy_cond.to(device)   # conditioning input F(X)
+            clean = clean.to(device)             # target X
 
-            # Standard diffusion training: add noise to the *clean* image
-            noise = torch.randn_like(clean)
-            t = torch.randint(0, scheduler.config.num_train_timesteps,
-                              (clean.size(0),), device=device).long()
-            x_t = scheduler.add_noise(clean, noise, t)
+            # Stochastic interpolant: I_t = (1-t)*Z + t*X
+            noise = torch.randn_like(clean)                         # Z
+            t = torch.rand(clean.size(0), device=device)            # t ~ U[0,1]
+            t_view = t.view(-1, 1, 1, 1)
+            x_t = (1 - t_view) * noise + t_view * clean            # I_t
+            velocity = clean - noise                                 # dI_t/dt = X - Z
 
-            # Predict the noise, conditioned on the noisy MNIST
-            pred = model(x_t, t, noisy_cond)
-            loss = F.mse_loss(pred, noise)
+            # Scale t to DiT's ada-norm range
+            t_dit = (t * 999).long()
+
+            pred = model(x_t, t_dit, noisy_cond)
+            loss = F.mse_loss(pred, velocity)
 
             opt.zero_grad()
             loss.backward()
@@ -125,45 +128,40 @@ def train(epochs=10, batch_size=128, lr=1e-4, device=device, noise_std=0.3, corr
             if step % 100 == 0:
                 print(f"epoch {epoch} step {step}: loss={loss.item():.4f}")
 
-    return model, scheduler
+    return model
 
 
 # ---------- 4. Sampling ----------
 @torch.no_grad()
-def sample(model, scheduler, noisy_cond, device=device, num_steps=50, initial_state=None):
-    """Given a noisy MNIST batch, generate clean versions via DDPM sampling."""
+def sample(model, noisy_cond, device=device, num_steps=50, initial_state=None):
+    """Integrate dx/dt = v_theta(x, t, cond) from t=0 to t=1 with Euler steps."""
     model.eval()
-    scheduler.set_timesteps(num_steps)
     if initial_state is not None:
         x = initial_state.to(device)
     else:
-        x = torch.randn_like(noisy_cond).to(device)   # start from pure noise
+        x = torch.randn_like(noisy_cond).to(device)   # start from Z ~ N(0,I)
     noisy_cond = noisy_cond.to(device)
 
-    for t in scheduler.timesteps:
-        t_batch = t.expand(x.size(0)).to(device)
-        eps = model(x, t_batch, noisy_cond)
-        x = scheduler.step(eps, t, x).prev_sample
+    dt = 1.0 / num_steps
+    for i in range(num_steps):
+        t = i / num_steps
+        t_batch = torch.full((x.size(0),), t * 999, device=device).long()
+        v = model(x, t_batch, noisy_cond)
+        x = x + v * dt
     return x.clamp(-1, 1)
 
 @torch.no_grad()
-def visualize(model, scheduler, train=True, noise_std=0.3, corruption="awgn"):
+def visualize(model, train=True, noise_std=0.3, corruption="awgn"):
     model.eval()
-    model_cpu = model.to('cpu')  # move to CPU for visualization
-
-    scheduler.alphas_cumprod = scheduler.alphas_cumprod.to('cpu')
-    if hasattr(scheduler, 'betas'):
-        scheduler.betas = scheduler.betas.to('cpu')
-    if hasattr(scheduler, 'alphas'):
-        scheduler.alphas = scheduler.alphas.to('cpu')
+    model_cpu = model.to('cpu')
 
     test_ds = NoisyMNIST(train=train, noise_std=noise_std, corruption=corruption)
 
     n_vis = 8
     noisy_batch = torch.stack([test_ds[i][0] for i in range(n_vis)]).to('cpu')  # (n_vis, 1, 32, 32)
-    fixed_init = torch.randn(len(noisy_batch), 1, 32, 32, device='cpu')  # same initial noise for all samples
-    clean_pred = sample(model_cpu, scheduler, noisy_batch, device='cpu')
-    clean_pred_fixed = sample(model_cpu, scheduler, noisy_batch, device='cpu', initial_state=fixed_init)
+    fixed_init = torch.randn(len(noisy_batch), 1, 32, 32, device='cpu')
+    clean_pred = sample(model_cpu, noisy_batch, device='cpu')
+    clean_pred_fixed = sample(model_cpu, noisy_batch, device='cpu', initial_state=fixed_init)
 
     all_images = torch.cat([noisy_batch, clean_pred, clean_pred_fixed], dim=0)
     vmin = all_images.min().item()
@@ -184,26 +182,25 @@ def visualize(model, scheduler, train=True, noise_std=0.3, corruption="awgn"):
                 ax.set_title(title, loc='left', fontsize=11, x=-0.1, y=0.4)
 
     plt.tight_layout()
-    # Add a shared colorbar
     fig.subplots_adjust(right=0.92)
     cbar_ax = fig.add_axes([0.94, 0.15, 0.015, 0.7])
     fig.colorbar(im, cax=cbar_ax)
-    plt.savefig(f"{corruption}_mnist_transformer_results_train_{train}_noise_std_{noise_std:.2f}.png", dpi=300)
+    plt.savefig(f"si_{corruption}_mnist_transformer_results_train_{train}_noise_std_{noise_std:.2f}.png", dpi=300)
     plt.show()
 
 
 
 if __name__ == "__main__":
-    corruption = "awgn"
+    corruption = "awgn" # "awgn" or "mra"
     noise_std = 0.5
 
     print(f"Using device: {device}")
     print('Training model...')
-    model, scheduler = train(epochs=2, noise_std=noise_std, corruption=corruption)
+    model = train(epochs=2, noise_std=noise_std, corruption=corruption)
     print('Training complete.')
     print('Generating samples from data in train set...')
-    visualize(model, scheduler, train=True, noise_std=noise_std, corruption=corruption)
+    visualize(model, train=True, noise_std=noise_std, corruption=corruption)
     print('Generating samples complete. Generating samples from data in test set...')
-    visualize(model, scheduler, train=False, noise_std=noise_std, corruption=corruption)
+    visualize(model, train=False, noise_std=noise_std, corruption=corruption)
     print('Generating samples complete. Done.')
     print('Done.')
