@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 from diffusers import DiTTransformer2DModel
 import matplotlib.pyplot as plt
+import wandb
 
 try:
     from tqdm import tqdm
@@ -170,7 +171,8 @@ def sample_midpoint(model: nn.Module, y: torch.Tensor,
 # ══════════════════════════════════════════════════════════════════════
 def train_estep(model: nn.Module, x_pool: torch.Tensor,
                 noise_std: float, corruption: str,
-                epochs: int = 10, batch_size: int = 256, lr: float = 3e-4):
+                epochs: int = 10, batch_size: int = 256, lr: float = 3e-4,
+                global_step: list = None):
     loader = DataLoader(
         TensorDataset(x_pool),
         batch_size=batch_size, shuffle=True,
@@ -193,9 +195,15 @@ def train_estep(model: nn.Module, x_pool: torch.Tensor,
             loss = flow_matching_loss(model, x_batch, y_batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             running += loss.item()
+
+            if global_step is not None:
+                wandb.log({"train/loss": loss.item(),
+                           "train/grad_norm": grad_norm.item()},
+                          step=global_step[0])
+                global_step[0] += 1
 
         sched.step()
         print(f"    epoch {epoch:2d}  |  loss = {running / len(loader):.5f}")
@@ -235,79 +243,40 @@ def update_prior(model: nn.Module, y_obs: torch.Tensor,
 # ══════════════════════════════════════════════════════════════════════
 # 6.  Visualisation
 # ══════════════════════════════════════════════════════════════════════
-import matplotlib.pyplot as plt
-import torch
 
-def visualize_em(y_obs: torch.Tensor, x_gt: torch.Tensor,
-                 prior_history: list, corruption: str,
-                 n: int = 8, path: str = "scsi_results.png"):
-    
-    def to_img(t):
-        # lo, hi = t.min(), t.max()
-        # if hi - lo < 1e-8:
-        #     return torch.zeros_like(t)
-        # return (t - lo) / (hi - lo)
-        return t
-
-    n_rows = 2 + len(prior_history)
-    
-    # Increase columns by 1 to accommodate the histogram column
-    fig, axes = plt.subplots(n_rows, n + 1, figsize=(2 * n + 3, 2.2 * n_rows))
-
-    # Vmin and vmax for the ground truth
-    y_obs_slice = to_img(y_obs[:n, 0])
-    vmin = float(y_obs_slice.min())
-    vmax = float(y_obs_slice.max())
+def log_em_step_wandb(x_gt: torch.Tensor, y_obs: torch.Tensor,
+                      x_pool: torch.Tensor, em_step: int, n: int = 8):
+    y_slice = y_obs[:n, 0].cpu()
+    vmin = float(y_slice.min())
+    vmax = float(y_slice.max())
     if vmax - vmin < 1e-8:
         vmax = vmin + 1e-8
 
-    # --- Ground Truth (Row 0) ---
-    gt_data = []
-    for j in range(n):
-        img = to_img(x_gt[j, 0])
-        axes[0, j].imshow(img.cpu().numpy(), cmap="gray", vmin=vmin, vmax=vmax)
-        axes[0, j].axis("off")
-        gt_data.append(img)
-        
-    axes[0, 0].set_ylabel("GT  X", fontsize=10)
-    
-    # Plot GT Histogram on the last column
-    axes[0, n].hist(torch.stack(gt_data).cpu().numpy().flatten(), bins=50, color='black', alpha=0.7)
-    axes[0, n].set_title("Intensity Dist.", fontsize=10)
-    axes[0, n].set_yticks([]) # Hide y-ticks to keep it clean
-
-    # --- Observation (Row 1) ---
-    obs_data = []
-    for j in range(n):
-        img = to_img(y_obs[j, 0])
-        axes[1, j].imshow(img.cpu().numpy(), cmap="gray", vmin=vmin, vmax=vmax)
-        axes[1, j].axis("off")
-        obs_data.append(img)
-        
-    axes[1, 0].set_ylabel("Obs  Y", fontsize=10)
-    # Plot Obs Histogram
-    axes[1, n].hist(torch.stack(obs_data).cpu().numpy().flatten(), bins=50, color='black', alpha=0.7)
-    axes[1, n].set_yticks([])
-
-    # --- Prior History (Rows 2+) ---
-    for k, x_pool in enumerate(prior_history):
-        pool_data = []
+    fig, axes = plt.subplots(3, n, figsize=(2 * n, 6))
+    rows = [
+        (x_gt[:n, 0].cpu(),   "GT  X"),
+        (y_obs[:n, 0].cpu(),  "Obs F(X)"),
+        (x_pool[:n, 0].cpu(), f"π({em_step})"),
+    ]
+    for r, (data, label) in enumerate(rows):
+        axes[r, 0].set_ylabel(label, fontsize=10)
         for j in range(n):
-            img = to_img(x_pool[j, 0])
-            axes[2 + k, j].imshow(img.cpu().numpy(), cmap="gray", vmin=vmin, vmax=vmax)
-            axes[2 + k, j].axis("off")
-            pool_data.append(img)
-            
-        axes[2 + k, 0].set_ylabel(f"π({k})", fontsize=10)
-        # Plot Prior History Histogram
-        axes[2 + k, n].hist(torch.stack(pool_data).cpu().numpy().flatten(), bins=50, color='black', alpha=0.7)
-        axes[2 + k, n].set_yticks([])
+            axes[r, j].imshow(data[j].numpy(), cmap="gray", vmin=vmin, vmax=vmax)
 
-    fig.suptitle(f"SCSI Transformer — MNIST ({corruption} channel)", fontsize=13)
+            # Hide tick marks and tick labels instead of the whole axis
+            axes[r, j].set_xticks([])
+            axes[r, j].set_yticks([])
+            
+            # Optional: If you also want to remove the black box/border 
+            # around the image to perfectly mimic axis("off"):
+            for spine in axes[r, j].spines.values():
+                spine.set_visible(False)
+
+    fig.suptitle(f"EM step {em_step}", fontsize=12)
     plt.tight_layout()
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved → {path}")
+    wandb.log({"em/reconstruction": wandb.Image(fig)}, step=em_step)
+    plt.close(fig)
+
 
 # ══════════════════════════════════════════════════════════════════════
 # 7.  Main
@@ -333,6 +302,24 @@ if __name__ == "__main__":
     print(f"Device: {device}")
     print(f"Channel: {corruption},  noise_std={noise_std}")
     print(f"EM steps: {n_em_steps},  epochs/step: {epochs_per_em}\n")
+
+    wandb.init(
+        project="scsi-mnist",
+        config=dict(
+            corruption=corruption,
+            noise_std=noise_std,
+            n_obs=n_obs,
+            n_em_steps=n_em_steps,
+            epochs_per_em=epochs_per_em,
+            epochs_first_pass=epochs_first_pass,
+            sample_method=sample_method,
+            sample_steps=sample_steps,
+            batch_size=batch_size,
+            lr=lr,
+            fresh_model_every_em_step=fresh_model_every_em_step,
+        ),
+    )
+    global_step = [0]
 
     # ── Load MNIST ────────────────────────────────────────────────────
     transform = transforms.Compose([
@@ -382,7 +369,8 @@ if __name__ == "__main__":
         # E-step
         epochs = epochs_first_pass if k == 0 else epochs_per_em
         train_estep(model, x_pool, noise_std=noise_std, corruption=corruption,
-                    epochs=epochs, batch_size=batch_size, lr=lr)
+                    epochs=epochs, batch_size=batch_size, lr=lr,
+                    global_step=global_step)
         torch.save(model.state_dict(), ckpt_dir / f"model_em{k:02d}.pt")
         print(f"  ✓ saved checkpoint")
 
@@ -391,10 +379,7 @@ if __name__ == "__main__":
         x_pool = update_prior(model, y_obs, n_steps=sample_steps,
                               batch_size=batch_size*3, method=sample_method)
         prior_history.append(x_pool[:8].clone())
+        log_em_step_wandb(x_gt_all, y_obs, x_pool, em_step=k)
 
-    # ── Visualise ─────────────────────────────────────────────────────
-    visualize_em(
-        y_obs, x_gt_all, prior_history, corruption=corruption,
-        n=8, path=f"{corruption}_mnist_transformer_results.png",
-    )
+    wandb.finish()
     print("Done.")
