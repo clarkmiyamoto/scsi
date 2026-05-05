@@ -5,10 +5,10 @@
 #SBATCH --cpus-per-task=8        # cpu-cores per task (>1 if multi-threaded tasks)
 #SBATCH --mem=32G                # total memory per node (4 GB per cpu-core is default)
 #SBATCH --gres=gpu:1             # number of gpus per node
-#SBATCH --time=00:05:00          # total run time limit (HH:MM:SS)
+#SBATCH --time=03:00:00          # total run time limit (HH:MM:SS)
 
 REPO_DIR=scsi
-TARGET_FILE=awgn_mnist_transformer.py
+TARGET_FILE=scsi_mnist_transformer.py
 
 cd /scratch/cm6627/$REPO_DIR
 
