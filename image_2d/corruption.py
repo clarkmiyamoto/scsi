@@ -46,6 +46,22 @@ def random_translate(x: torch.Tensor) -> torch.Tensor:
     ])
     return translated
 
+def forward_channel_ell(x: torch.Tensor,
+                        ell: float,
+                        noise_std: float,
+                        p_drop: float,
+                        corruption: str) -> torch.Tensor:
+    '''
+    Curriculum corruption family: F_ell(x) = (1-ell)*x + ell*F(x).
+    At ell=0 returns x unchanged; at ell=1 matches forward_channel exactly.
+    '''
+    if ell <= 0.0:
+        return x.clone()
+    x_full = forward_channel(x, noise_std=noise_std, p_drop=p_drop, corruption=corruption)
+    if ell >= 1.0:
+        return x_full
+    return (1.0 - ell) * x + ell * x_full
+
 def remove_pixels(x: torch.Tensor, p_drop: float) -> torch.Tensor:
     """
     Randomly removes pixels by setting them to zero.
