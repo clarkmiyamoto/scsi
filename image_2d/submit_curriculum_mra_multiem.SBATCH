@@ -15,10 +15,10 @@ cd /scratch/cm6627/scsi/$REPO_DIR
 # Multiple EM steps per curriculum level for more refinement at each ell level
 uv run $TARGET_FILE \
     --corruption=mra \
-    --n_ell_levels=5 \
-    --epochs_per_level=10 \
-    --em_steps_per_level=3 \
+    --n_ell_levels=10 \
+    --epochs_per_level=20 \
+    --em_steps_per_level=5 \
     --ell_min=0.0 \
     --ell_max=1.0 \
     --n_em_steps=2000 \
-    --epochs_per_em=2
+    --epochs_per_em=5
