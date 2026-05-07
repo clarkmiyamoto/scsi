@@ -1,6 +1,12 @@
+# Local environments
+*.pi
+*.vscode
+*.claude
+
 # Ouptuts
 *.png
 *.out
+
 
 # Weights & Biases
 wandb/

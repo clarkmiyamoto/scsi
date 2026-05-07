@@ -12,4 +12,4 @@ TARGET_FILE=main.py
 
 cd /scratch/cm6627/scsi/$REPO_DIR
 
-uv run $TARGET_FILE --corruption=mra --epochs_per_em=5 --epochs_first_pass=2000
+uv run $TARGET_FILE --corruption=drop_mra --epochs_per_em=2 --epochs_first_pass=2000

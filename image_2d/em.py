@@ -23,7 +23,9 @@ def train_estep(model: nn.Module, x_pool: torch.Tensor,
                 noise_std: float, p_drop: float, corruption: str, style: str,
                 epochs: int, batch_size: int, lr: float,
                 global_step: list,
-                device: torch.device):
+                device: torch.device,
+                z_pool: torch.Tensor | None = None,
+                coupled_fraction: float = 0.0):
     '''
     Args:
         model: nn.Module, the model to train
@@ -37,9 +39,18 @@ def train_estep(model: nn.Module, x_pool: torch.Tensor,
         batch_size: int, the batch size
         lr: float, the learning rate
         global_step: list, the global step
+        z_pool: optional paired Z tensor from update_prior, shape (N, 1, H, W)
+        coupled_fraction: fraction of each batch that uses paired Z from z_pool
     '''
+    if z_pool is not None and coupled_fraction > 0.0:
+        dataset = TensorDataset(x_pool, z_pool)
+        has_z = True
+    else:
+        dataset = TensorDataset(x_pool)
+        has_z = False
+
     loader = DataLoader(
-        TensorDataset(x_pool),
+        dataset,
         batch_size=batch_size, shuffle=True,
         num_workers=0, drop_last=True,
     )
@@ -49,16 +60,36 @@ def train_estep(model: nn.Module, x_pool: torch.Tensor,
     for epoch in range(1, epochs + 1):
         model.train()
         running = 0.0
-        for (x_batch,) in tqdm(loader,
-                                desc=f"  E-step epoch {epoch}/{epochs}",
-                                leave=False):
-            x_batch = x_batch.to(device)
+        for batch in tqdm(loader,
+                          desc=f"  E-step epoch {epoch}/{epochs}",
+                          leave=False):
+            if has_z:
+                x_batch, z_batch_coupled = batch
+                x_batch = x_batch.to(device)
+                z_batch_coupled = z_batch_coupled.to(device)
+
+                B = x_batch.size(0)
+                n_coupled = int(round(coupled_fraction * B))
+                n_random = B - n_coupled
+
+                if n_coupled == B:
+                    z_batch = z_batch_coupled
+                elif n_coupled == 0:
+                    z_batch = torch.randn_like(x_batch)
+                else:
+                    z_random = torch.randn(n_random, *x_batch.shape[1:], device=device)
+                    z_batch = torch.cat([z_batch_coupled[:n_coupled], z_random], dim=0)
+            else:
+                (x_batch,) = batch
+                x_batch = x_batch.to(device)
+                z_batch = None
+
             # Generate fresh Y from current prior samples
             y_batch = forward_channel(x_batch, noise_std=noise_std,
                                       p_drop=p_drop,
                                       corruption=corruption)
 
-            loss = loss_func(model, x_batch, y_batch, style=style)
+            loss = loss_func(model, x_batch, y_batch, style=style, z=z_batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -86,14 +117,17 @@ def update_prior(model: nn.Module, y_obs: torch.Tensor,
     model.eval()
     N = y_obs.size(0)
     chunks = []
+    z_chunks = []
     y_gpu = y_obs.to(device)
     for start in tqdm(range(0, N, batch_size), desc="  M-step", leave=False):
         end = min(start + batch_size, N)
-        initial_state = torch.randn(y_gpu[start:end].size(0), 1, IMAGE_SIZE, IMAGE_SIZE, device=y_gpu.device)
+        initial_state = torch.randn(end - start, 1, IMAGE_SIZE, IMAGE_SIZE, device=y_gpu.device)
         x_batch = sample(model, initial_state, y_gpu[start:end], n_steps=n_steps, method=method)
         chunks.append(x_batch.cpu())
+        z_chunks.append(initial_state.cpu())
 
     result = torch.cat(chunks, dim=0)
+    z_pool = torch.cat(z_chunks, dim=0)
     print(f"    prior range=[{result.min():.3f}, {result.max():.3f}]"
           f"  mean={result.mean():.4f}  std={result.std():.4f}")
 
@@ -102,7 +136,7 @@ def update_prior(model: nn.Module, y_obs: torch.Tensor,
             torch.cuda.empty_cache()
         elif device.type == "mps":
             torch.mps.empty_cache()
-    return result, initial_state
+    return result, z_pool
 
 
 ########################################################

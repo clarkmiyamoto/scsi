@@ -65,14 +65,16 @@ def beta_dot_gvp(t: torch.Tensor) -> torch.Tensor:
 ########################################################
 # Loss
 ########################################################
-def loss_func(model: nn.Module, 
+def loss_func(model: nn.Module,
          x: torch.Tensor,
          y: torch.Tensor,
-         style: str) -> torch.Tensor:
+         style: str,
+         z: torch.Tensor | None = None) -> torch.Tensor:
     """Stochastic interpolant loss with I_t = (1-t)*Z + t*X."""
     B = x.size(0)
     t = torch.rand(B, device=x.device)
-    z = torch.randn_like(x)
+    if z is None:
+        z = torch.randn_like(x)
     t4 = t[:, None, None, None]
     
     I_t, I_dot_t = interpolant(z, x, t4, style)

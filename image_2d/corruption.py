@@ -23,8 +23,6 @@ def forward_channel(x: torch.Tensor,
         return awgn(x, noise_std)
     elif corruption == "mra":
         return random_translate(x) + awgn(x, noise_std)
-    elif corruption == "drop":
-        return remove_pixels(x)
     elif corruption == "drop_mra":
         return remove_pixels(random_translate(x), p_drop=p_drop) + awgn(x, noise_std)
     else:

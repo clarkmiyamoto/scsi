@@ -8,7 +8,7 @@
 #SBATCH --time=03:00:00          # total run time limit (HH:MM:SS)
 
 REPO_DIR=image_2d
-TARGET_FILE=train.py
+TARGET_FILE=main.py
 
 cd /scratch/cm6627/scsi/$REPO_DIR
 

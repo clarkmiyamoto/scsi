@@ -22,8 +22,8 @@ def parse_args():
         "--corruption",
         type=str,
         default="awgn",
-        choices=["awgn", "mra"],
-        help="Forward channel: awgn (Y=X+noise) or mra (random 2-D shift + noise)",
+        choices=["awgn", "mra", "drop_mra"],
+        help="Forward channel: awgn, mra (random 2-D shift + noise), or drop_mra (shift + pixel drop + noise)",
     )
     parser.add_argument(
         "--n_em_steps",
@@ -51,6 +51,12 @@ def parse_args():
         help="Interpolant style: linear or gvp",
     )
     parser.add_argument(
+        "--coupled_fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of E-step batch samples using paired Z from M-step (0.0=uncoupled, 1.0=fully coupled)",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Debug mode",
@@ -67,7 +73,7 @@ if __name__ == "__main__":
     # Problem parameter
     corruption   = args.corruption # "awgn", "mra", "drop", "drop_mra"
     noise_std    = 0.3 # Noise standard deviation
-    p_drop       = 0.1 # Probability of removing a pixel from the image (0.0 to 1.0)
+    p_drop       = 0.3 # Probability of removing a pixel from the image (0.0 to 1.0)
     n_obs        = 10_000 # Number of observations, instead of full dataset
 
     # SCSI parameters
@@ -77,6 +83,7 @@ if __name__ == "__main__":
     sample_method = "euler" # "euler" or "midpoint"
     sample_steps = 50
     interpolant_style = args.interpolant_style        # interpolant style: "linear" or "gvp"
+    coupled_fraction = args.coupled_fraction
     fresh_model_every_em_step = False
 
     # Training parameters
@@ -101,6 +108,7 @@ if __name__ == "__main__":
             batch_size=batch_size,
             lr=lr,
             interpolant_style=interpolant_style,
+            coupled_fraction=coupled_fraction,
             fresh_model_every_em_step=fresh_model_every_em_step,
         ),
     )
@@ -114,6 +122,7 @@ if __name__ == "__main__":
 
     # ── Bootstrap: pi^(0) = Y_obs ────────────────────────────────────
     x_pool = y_obs.clone()
+    z_pool = None
     prior_history = [x_pool[:8].clone()]
 
     ckpt_dir = Path(f"checkpoints_{corruption}_mnist_transformer")
@@ -145,13 +154,14 @@ if __name__ == "__main__":
         epochs = epochs_first_pass if k == 0 else epochs_per_em
         train_estep(model, x_pool, noise_std=noise_std, p_drop=p_drop, corruption=corruption,
                     style=interpolant_style, epochs=epochs, batch_size=batch_size, lr=lr,
-                    global_step=global_step, device=device)
+                    global_step=global_step, device=device,
+                    z_pool=z_pool, coupled_fraction=coupled_fraction)
         torch.save(model.state_dict(), ckpt_dir / f"model_em{k:02d}.pt")
         print(f"  ✓ saved checkpoint")
 
         # M-step
         print(f"\n  M-step: sampling π({k+1}) ...")
-        x_pool, initial_state = update_prior(model, y_obs, n_steps=sample_steps,
+        x_pool, z_pool = update_prior(model, y_obs, n_steps=sample_steps,
                               batch_size=batch_size*3, method=sample_method,
                               device=device)
         prior_history.append(x_pool[:8].clone())
