@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model import INTEGRATION_SCALE, IMAGE_SIZE
+from model import INTEGRATION_SCALE, IMAGE_SIZE, ELL_SCALE
 
 ########################################################
 # Interpolants
@@ -131,5 +131,78 @@ def _sample_midpoint(model: nn.Module, initial_state: torch.Tensor, y: torch.Ten
         x_mid = x + v1 * (dt / 2.0)
         t2 = torch.full((B,), (t_val + dt / 2.0) * INTEGRATION_SCALE, device=y.device).long()
         v2 = model(x_mid, t2, y)
+        x = x + v2 * dt
+    return x
+
+
+########################################################
+# Curriculum (ell-conditioned) variants
+########################################################
+def loss_func_ell(model: nn.Module,
+                  x: torch.Tensor,
+                  y: torch.Tensor,
+                  ell: float,
+                  style: str,
+                  z: torch.Tensor | None = None) -> torch.Tensor:
+    """Stochastic interpolant loss conditioned on curriculum level ell."""
+    B = x.size(0)
+    t = torch.rand(B, device=x.device)
+    if z is None:
+        z = torch.randn_like(x)
+    t4 = t[:, None, None, None]
+
+    I_t, I_dot_t = interpolant(z, x, t4, style)
+
+    t_dit = (t * INTEGRATION_SCALE).long()
+    pred = model(I_t, t_dit, y, ell)
+
+    return F.mse_loss(pred, I_dot_t)
+
+
+@torch.no_grad()
+def sample_ell(model: nn.Module,
+               initial_state: torch.Tensor,
+               y: torch.Tensor,
+               ell: float,
+               n_steps: int = 50,
+               method: str = "euler") -> torch.Tensor:
+    model.eval()
+    if method == "euler":
+        return _sample_euler_ell(model, initial_state, y, ell, n_steps)
+    elif method == "midpoint":
+        return _sample_midpoint_ell(model, initial_state, y, ell, n_steps)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+
+@torch.no_grad()
+def _sample_euler_ell(model: nn.Module, initial_state: torch.Tensor, y: torch.Tensor,
+                      ell: float, n_steps: int = 50) -> torch.Tensor:
+    model.eval()
+    B = y.size(0)
+    x = initial_state
+    dt = 1.0 / n_steps
+    for i in range(n_steps):
+        t_val = i * dt
+        t1 = torch.full((B,), t_val * INTEGRATION_SCALE, device=y.device).long()
+        v1 = model(x, t1, y, ell)
+        x = x + v1 * dt
+    return x
+
+
+@torch.no_grad()
+def _sample_midpoint_ell(model: nn.Module, initial_state: torch.Tensor, y: torch.Tensor,
+                         ell: float, n_steps: int = 50) -> torch.Tensor:
+    model.eval()
+    B = y.size(0)
+    x = initial_state
+    dt = 1.0 / n_steps
+    for i in range(n_steps):
+        t_val = i * dt
+        t1 = torch.full((B,), t_val * INTEGRATION_SCALE, device=y.device).long()
+        v1 = model(x, t1, y, ell)
+        x_mid = x + v1 * (dt / 2.0)
+        t2 = torch.full((B,), (t_val + dt / 2.0) * INTEGRATION_SCALE, device=y.device).long()
+        v2 = model(x_mid, t2, y, ell)
         x = x + v2 * dt
     return x
