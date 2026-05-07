@@ -22,7 +22,7 @@ def parse_args():
         "--corruption",
         type=str,
         default="awgn",
-        choices=["awgn", "mra", "drop_mra"],
+        choices=["awgn", "mra", "drop_mra", "identity"],
         help="Forward channel: awgn, mra (random 2-D shift + noise), or drop_mra (shift + pixel drop + noise)",
     )
     parser.add_argument(

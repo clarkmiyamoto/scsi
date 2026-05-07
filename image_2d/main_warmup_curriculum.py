@@ -24,8 +24,6 @@ def parse_args():
                         choices=["awgn", "mra", "drop_mra"])
     parser.add_argument("--n_em_steps", type=int, default=200)
     parser.add_argument("--epochs_per_em", type=int, default=2)
-    parser.add_argument("--epochs_first_pass", type=int, default=10,
-                        help="E-step epochs for first EM iteration after warmup")
     parser.add_argument("--interpolant_style", type=str, default="linear",
                         choices=["linear", "gvp"])
     parser.add_argument("--coupled_fraction", type=float, default=0.0)
@@ -49,7 +47,6 @@ if __name__ == "__main__":
     if args.debug:
         args.n_em_steps = 1
         args.epochs_per_em = 1
-        args.epochs_first_pass = 1
         args.n_ell_levels = 3
         args.epochs_per_level = 1
         args.em_steps_per_level = 1
@@ -63,7 +60,6 @@ if __name__ == "__main__":
     # SCSI parameters
     n_em_steps        = args.n_em_steps
     epochs_per_em     = args.epochs_per_em
-    epochs_first_pass = args.epochs_first_pass
     sample_method     = "euler"
     sample_steps      = 50
     interpolant_style = args.interpolant_style
@@ -95,7 +91,6 @@ if __name__ == "__main__":
             n_obs=n_obs,
             n_em_steps=n_em_steps,
             epochs_per_em=epochs_per_em,
-            epochs_first_pass=epochs_first_pass,
             sample_method=sample_method,
             sample_steps=sample_steps,
             batch_size=batch_size,
@@ -169,7 +164,7 @@ if __name__ == "__main__":
         print(f"\n--- EM iteration {k} ---")
         torch.save(x_pool, prior_dir / f"prior_em{k:02d}.pt")
 
-        epochs = epochs_first_pass if k == 0 else epochs_per_em
+        epochs = epochs_per_em
         train_estep_ell(model, x_pool, ell=1.0,
                         noise_std=noise_std, p_drop=p_drop, corruption=corruption,
                         style=interpolant_style, epochs=epochs,

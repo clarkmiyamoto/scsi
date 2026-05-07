@@ -30,6 +30,8 @@ def forward_channel(x: torch.Tensor,
         x = remove_pixels(x, p_drop=p_drop)
         x = awgn(x, noise_std)
         return x
+    elif corruption == "identity":
+        return x
     else:
         raise ValueError(f"Unknown corruption: {corruption}")
 
