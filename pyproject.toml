@@ -8,11 +8,14 @@ dependencies = [
     "matplotlib>=3.10.9",
     "tqdm>=4.67.3",
     "torch",
+    "torch-geometric>=2.7.0",
     "torchvision",
     "wandb>=0.26.1",
     "transformers>=5.7.0",
     "accelerate>=1.13.0",
     "diffusers>=0.37.1",
+    "scikit-image>=0.26.0",
+    "trimesh>=4.12.2",
 ]
 
 [tool.uv.sources]
