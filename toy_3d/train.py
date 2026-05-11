@@ -13,9 +13,12 @@ Setup:
 import argparse
 from pathlib import Path
 
+import matplotlib
+import torch
+if torch.cuda.is_available():
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation
