@@ -38,6 +38,12 @@ except ImportError:
     def tqdm(it, **kw):
         return it
 
+try:
+    import imageio
+    _IMAGEIO_AVAILABLE = True
+except ImportError:
+    _IMAGEIO_AVAILABLE = False
+
 INTEGRATION_SCALE = 999   # integer time range for UNet timestep embedding
 
 
@@ -272,7 +278,24 @@ _VIEW_THETA = torch.tensor(
 )
 
 
-def render_volume(vol: torch.Tensor) -> np.ndarray:
+def _make_z_rot_theta(phi: float) -> torch.Tensor:
+    """(1,3,4) rotation matrix: z-axis rotation by phi composed with the view rotation."""
+    c, s = float(np.cos(phi)), float(np.sin(phi))
+    Rz = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=np.float32)
+    R = _VIEW_R.as_matrix().astype(np.float32) @ Rz
+    return torch.tensor(
+        np.concatenate([R, np.zeros((3, 1), dtype=np.float32)], axis=1)[None]
+    )
+
+
+def _project_from_pov(vol: torch.Tensor, theta: torch.Tensor) -> np.ndarray:
+    """Sum-project a (D,H,W) volume along depth after rotating by theta. Returns (H,W)."""
+    vol5 = vol.float().unsqueeze(0).unsqueeze(0).cpu()   # (1,1,D,H,W)
+    vol_rot = _apply_rotation(vol5, theta)
+    return vol_rot[0, 0].sum(dim=0).numpy()              # (H, W)
+
+
+def render_volume(vol: torch.Tensor, theta: torch.Tensor | None = None) -> np.ndarray:
     """
     Render a (D, H, W) voxel volume as an (H, W, 3) RGB image.
 
@@ -282,9 +305,11 @@ def render_volume(vol: torch.Tensor) -> np.ndarray:
       3. Color by image-row height (plasma: bottom=purple, top=yellow).
       4. Shade with surface normals derived from the depth buffer (Lambert).
     """
+    if theta is None:
+        theta = _VIEW_THETA
     # 1. Viewing rotation (periodic BC via _apply_rotation)
     vol5 = vol.float().unsqueeze(0).unsqueeze(0).cpu()   # (1,1,D,H,W)
-    vol_rot = _apply_rotation(vol5, _VIEW_THETA)
+    vol_rot = _apply_rotation(vol5, theta)
     occ = (vol_rot[0, 0] > 0.0).numpy()   # (D, H, W)
     D, H, W = occ.shape
 
@@ -407,7 +432,117 @@ def log_samples(
     plt.close(fig)
 
 
-# ── 7. Training ───────────────────────────────────────────────────────────────
+# ── 7. Rotation movie ────────────────────────────────────────────────────────
+
+def make_rotation_movie(
+    x_gt: torch.Tensor,    # (N, 1, D, H, W)
+    y_obs: torch.Tensor,   # (N, 1, H, W)     — fixed GT observations
+    x_hat1: torch.Tensor,  # (N, 1, D, H, W)
+    x_hat2: torch.Tensor,  # (N, 1, D, H, W)
+    epoch: int,
+    use_wandb: bool,
+    n_frames: int = 72,
+    fps: int = 15,
+) -> None:
+    """
+    Save a movie of one full z-axis revolution for N shapes.
+
+    Layout per frame (2*N rows × 3 cols):
+      For each shape i:
+        Row 2i:   GT render   | Recon1 render | Recon2 render  (rotating)
+        Row 2i+1: GT proj     | Recon1 POV    | Recon2 POV     (GT fixed)
+    """
+    N = x_gt.size(0)
+
+    # Pre-compute per-sample GT projection normalisation (stable across frames)
+    gt_projs_np = [y_obs[i, 0].float().cpu().numpy() for i in range(N)]
+    gt_ranges = []
+    for p in gt_projs_np:
+        lo, hi = float(p.min()), float(p.max())
+        if hi - lo < 1e-8:
+            hi = lo + 1e-8
+        gt_ranges.append((lo, hi))
+
+    def _to_uint8_gray(arr: np.ndarray, vmin=None, vmax=None) -> np.ndarray:
+        if vmin is None:
+            vmin = arr.min()
+        if vmax is None:
+            vmax = arr.max()
+        if vmax - vmin < 1e-8:
+            vmax = vmin + 1e-8
+        gray = np.clip((arr - vmin) / (vmax - vmin), 0.0, 1.0)
+        rgb = np.stack([gray, gray, gray], axis=-1)
+        return (rgb * 255).astype(np.uint8)
+
+    col_labels = ["GT", "Recon 1", "Recon 2"]
+    n_rows = 2 * N
+
+    frames = []
+    for i in range(n_frames):
+        phi = 2.0 * np.pi * i / n_frames
+        theta = _make_z_rot_theta(phi)
+
+        fig, axes = plt.subplots(n_rows, 3, figsize=(6.6, 2.2 * n_rows), squeeze=False)
+
+        for s in range(N):
+            r_render = 2 * s       # render row for shape s
+            r_proj   = 2 * s + 1   # projection row for shape s
+
+            renders = [
+                render_volume(x_gt[s, 0].cpu(),   theta),
+                render_volume(x_hat1[s, 0].cpu(), theta),
+                render_volume(x_hat2[s, 0].cpu(), theta),
+            ]
+            lo, hi = gt_ranges[s]
+            projs = [
+                _to_uint8_gray(gt_projs_np[s], lo, hi),
+                _to_uint8_gray(_project_from_pov(x_hat1[s, 0].cpu(), theta)),
+                _to_uint8_gray(_project_from_pov(x_hat2[s, 0].cpu(), theta)),
+            ]
+
+            for j in range(3):
+                if s == 0:
+                    axes[r_render, j].set_title(col_labels[j], fontsize=8)
+                axes[r_render, j].imshow(renders[j], interpolation="nearest")
+                axes[r_render, j].axis("off")
+                axes[r_proj, j].imshow(projs[j], cmap="gray", vmin=0, vmax=255,
+                                       interpolation="nearest")
+                axes[r_proj, j].axis("off")
+
+            axes[r_render, 0].set_ylabel(f"Shape {s+1}\n3-D", fontsize=7,
+                                         rotation=0, labelpad=50, va="center")
+            axes[r_proj, 0].set_ylabel(f"Proj", fontsize=7,
+                                       rotation=0, labelpad=50, va="center")
+
+        deg = int(round(np.degrees(phi)))
+        fig.suptitle(f"Epoch {epoch}  |  z-rotation {deg:3d}°", fontsize=9)
+        plt.tight_layout()
+
+        fig.canvas.draw()
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        w_log, h_log = fig.canvas.get_width_height()
+        scale = int(round((len(buf) / (4 * w_log * h_log)) ** 0.5))
+        frame = buf.reshape(h_log * scale, w_log * scale, 4)[:, :, :3]
+        frames.append(frame)
+        plt.close(fig)
+
+    out_dir = Path("toy3d_eval")
+    out_dir.mkdir(exist_ok=True)
+
+    if _IMAGEIO_AVAILABLE:
+        out_path = out_dir / f"epoch_{epoch:04d}_rotation.gif"
+        imageio.mimsave(str(out_path), frames, fps=fps)
+        if use_wandb:
+            wandb.log({"eval/rotation_movie": wandb.Video(str(out_path), fps=fps)},
+                      step=epoch)
+    else:
+        frame_dir = out_dir / f"epoch_{epoch:04d}_rotation_frames"
+        frame_dir.mkdir(exist_ok=True)
+        for fi, frame in enumerate(frames):
+            plt.imsave(str(frame_dir / f"frame_{fi:03d}.png"), frame)
+
+
+# ── 8. Training ───────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(description="toy_3d: supervised CryoEM 3D diffusion")
@@ -455,8 +590,9 @@ if __name__ == "__main__":
     print(f"  {N} volumes  shape={tuple(x_gt.shape)}  "
           f"range=[{x_gt.min():.2f}, {x_gt.max():.2f}]")
 
-    # Fixed held-out observations for evaluation
-    x_eval = x_gt[:args.n_eval].to(device)
+    # Fixed held-out observations — one sample per class (sphere/cube/cylinder/ellipsoid/torus)
+    class_indices = [c * args.n_per_class for c in range(5)]
+    x_eval = x_gt[class_indices].to(device)
     y_eval = forward_channel(x_eval, noise_std=args.noise_std)
 
     loader = DataLoader(
@@ -513,6 +649,11 @@ if __name__ == "__main__":
                 x_hat2 = sample_euler(model, y_eval, args.vol_size, n_steps=args.sample_steps)
             log_samples(x_eval, y_eval, x_hat1, x_hat2,
                         noise_std=args.noise_std, epoch=epoch, use_wandb=use_wandb)
+            make_rotation_movie(
+                x_eval.cpu(), y_eval.cpu(),
+                x_hat1.cpu(), x_hat2.cpu(),
+                epoch=epoch, use_wandb=use_wandb,
+            )
 
     if use_wandb:
         wandb.finish()

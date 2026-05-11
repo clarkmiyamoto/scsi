@@ -6,6 +6,8 @@
 # Ouptuts
 *.png
 *.out
+*.mp4
+*.gif
 
 
 # Weights & Biases
