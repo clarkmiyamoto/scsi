@@ -581,7 +581,17 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
-    print(f"Device: {device}")
+    def _empty_cache():
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
+
+    # Mixed precision: CUDA uses autocast + GradScaler; MPS/CPU use full precision.
+    use_amp = device.type == "cuda"
+    scaler  = torch.amp.GradScaler("cuda", enabled=use_amp)
+
+    print(f"Device: {device}  amp={use_amp}")
 
     # ── Dataset ────────────────────────────────────────────────────────────────
     print("Generating toy dataset ...")
@@ -598,6 +608,7 @@ if __name__ == "__main__":
     loader = DataLoader(
         TensorDataset(x_gt), batch_size=args.batch_size,
         shuffle=True, num_workers=0, drop_last=True,
+        pin_memory=(device.type == "cuda"),
     )
 
     # ── Model ──────────────────────────────────────────────────────────────────
@@ -625,14 +636,18 @@ if __name__ == "__main__":
         model.train()
         running = 0.0
         for (x_batch,) in tqdm(loader, desc=f"epoch {epoch:4d}", leave=False):
-            x_batch = x_batch.to(device)
+            x_batch = x_batch.to(device, non_blocking=(device.type == "cuda"))
             y_batch = forward_channel(x_batch, noise_std=args.noise_std)
 
-            loss = si_loss(model, x_batch, y_batch)
+            with torch.autocast(device.type, enabled=use_amp):
+                loss = si_loss(model, x_batch, y_batch)
+
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             running += loss.item()
 
         sched.step()
@@ -654,6 +669,7 @@ if __name__ == "__main__":
                 x_hat1.cpu(), x_hat2.cpu(),
                 epoch=epoch, use_wandb=use_wandb,
             )
+            _empty_cache()
 
     if use_wandb:
         wandb.finish()
