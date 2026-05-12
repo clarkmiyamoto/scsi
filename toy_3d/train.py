@@ -14,9 +14,8 @@ import argparse
 from pathlib import Path
 
 import matplotlib
+matplotlib.use("Agg")   # no display server on HPC; must set before pyplot import
 import torch
-if torch.cuda.is_available():
-    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn as nn
