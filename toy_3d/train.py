@@ -11,6 +11,7 @@ Setup:
 """
 
 import argparse
+import io
 from pathlib import Path
 
 import matplotlib
@@ -520,12 +521,12 @@ def make_rotation_movie(
         fig.suptitle(f"Epoch {epoch}  |  z-rotation {deg:3d}°", fontsize=9)
         plt.tight_layout()
 
-        fig.canvas.draw()
-        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-        w_log, h_log = fig.canvas.get_width_height()
-        scale = int(round((len(buf) / (4 * w_log * h_log)) ** 0.5))
-        frame = buf.reshape(h_log * scale, w_log * scale, 4)[:, :, :3]
-        frames.append(frame)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=72)
+        buf.seek(0)
+        frame = plt.imread(buf)[:, :, :3]   # (H, W, 3) float32 in [0, 1]
+        frames.append((frame * 255).astype(np.uint8))
+        buf.close()
         plt.close(fig)
 
     out_dir = Path("toy3d_eval")
