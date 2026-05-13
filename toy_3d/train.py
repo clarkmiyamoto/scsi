@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader, TensorDataset
 try:
     from diffusers import UNet3DConditionModel
 except ImportError:
-    raise ImportError("pip install diffusers>=0.37.0")
+    raise ImportError("Missing `diffusers` package.")
 
 try:
     import wandb
@@ -480,8 +480,18 @@ def make_rotation_movie(
     col_labels = ["GT", "Recon 1", "Recon 2"]
     n_rows = 2 * N
 
-    frames = []
-    for i in range(n_frames):
+    out_dir = Path("toy3d_eval")
+    out_dir.mkdir(exist_ok=True)
+
+    if _IMAGEIO_AVAILABLE:
+        out_path = out_dir / f"epoch_{epoch:04d}_rotation.gif"
+        writer = imageio.get_writer(str(out_path), fps=fps)
+    else:
+        frame_dir = out_dir / f"epoch_{epoch:04d}_rotation_frames"
+        frame_dir.mkdir(exist_ok=True)
+        writer = None
+
+    for i in tqdm(range(n_frames)):
         phi = 2.0 * np.pi * i / n_frames
         theta = _make_z_rot_theta(phi)
 
@@ -524,25 +534,20 @@ def make_rotation_movie(
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=72)
         buf.seek(0)
-        frame = plt.imread(buf)[:, :, :3]   # (H, W, 3) float32 in [0, 1]
-        frames.append((frame * 255).astype(np.uint8))
+        frame_u8 = (plt.imread(buf)[:, :, :3] * 255).astype(np.uint8)
         buf.close()
         plt.close(fig)
 
-    out_dir = Path("toy3d_eval")
-    out_dir.mkdir(exist_ok=True)
+        if writer is not None:
+            writer.append_data(frame_u8)
+        else:
+            plt.imsave(str(frame_dir / f"frame_{i:03d}.png"), frame_u8)
 
-    if _IMAGEIO_AVAILABLE:
-        out_path = out_dir / f"epoch_{epoch:04d}_rotation.gif"
-        imageio.mimsave(str(out_path), frames, fps=fps)
+    if writer is not None:
+        writer.close()
         if use_wandb:
             wandb.log({"eval/rotation_movie": wandb.Video(str(out_path), fps=fps)},
                       step=epoch)
-    else:
-        frame_dir = out_dir / f"epoch_{epoch:04d}_rotation_frames"
-        frame_dir.mkdir(exist_ok=True)
-        for fi, frame in enumerate(frames):
-            plt.imsave(str(frame_dir / f"frame_{fi:03d}.png"), frame)
 
 
 # ── 8. Training ───────────────────────────────────────────────────────────────
@@ -559,6 +564,8 @@ def parse_args():
     p.add_argument("--n_eval",       type=int,   default=8,
                    help="Number of held-out samples to evaluate")
     p.add_argument("--sample_steps", type=int,   default=50)
+    p.add_argument("--n_frames",     type=int,   default=72,
+                   help="Frames in rotation movie (reduced to 8 in --debug)")
     p.add_argument("--no_wandb",     action="store_true")
     p.add_argument("--debug",        action="store_true",
                    help="2 epochs, tiny model, quick smoke test")
@@ -575,6 +582,7 @@ if __name__ == "__main__":
         args.eval_every   = 1
         args.n_eval       = 4
         args.sample_steps = 5
+        args.n_frames     = 8
 
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -671,6 +679,7 @@ if __name__ == "__main__":
                 x_eval.cpu(), y_eval.cpu(),
                 x_hat1.cpu(), x_hat2.cpu(),
                 epoch=epoch, use_wandb=use_wandb,
+                n_frames=args.n_frames,
             )
             _empty_cache()
 
