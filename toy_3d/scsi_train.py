@@ -160,6 +160,51 @@ def forward_channel(x: torch.Tensor, noise_std: float) -> torch.Tensor:
     return proj + noise_std * torch.randn_like(proj)
 
 
+def bootstrap_revolve(y_obs: torch.Tensor, vol_size: int) -> torch.Tensor:
+    """
+    Revolve 2D projections around the y-axis to form 3D volumes.
+    A 2D circle → 3D sphere; a filled square → cylinder.
+
+    For each 3D voxel at (z, y, x), samples y_obs at (y, r) where
+    r = sqrt(x^2 + z^2). r > 1 falls outside the image → empty (-1).
+
+    y_obs  : (N, 1, H, W)
+    returns: (N, 1, D, H, W)  values in [-1, 1]
+    """
+    N, _, H, W = y_obs.shape
+    D = vol_size
+    device = y_obs.device
+
+    # Normalize per sample: background → 0, peak projection signal → 1
+    flat = y_obs.reshape(N, -1)
+    mn = flat.min(dim=1).values.view(N, 1, 1, 1)
+    mx = flat.max(dim=1).values.view(N, 1, 1, 1)
+    obs_norm = (y_obs - mn) / (mx - mn + 1e-8)  # (N, 1, H, W) in [0, 1]
+
+    lin = torch.linspace(-1.0, 1.0, D, device=device)
+    zz, yy, xx = torch.meshgrid(lin, lin, lin, indexing="ij")  # (D, D, D)
+
+    # Radius from y-axis for each voxel
+    r_vox = torch.sqrt(xx**2 + zz**2)  # (D, D, D), range [0, sqrt(2)]
+
+    # Build sampling grid: flatten (z, y) dims → D*D rows, keep x as D cols
+    # grid[..., 0] = column lookup (radius), grid[..., 1] = row lookup (height)
+    grid = torch.stack(
+        [r_vox.reshape(D * D, D), yy.reshape(D * D, D)],
+        dim=-1,
+    ).unsqueeze(0).expand(N, -1, -1, -1)  # (N, D*D, D, 2)
+
+    # grid_sample: (N,1,H,W) × (N,D*D,D,2) → (N,1,D*D,D)
+    sampled = F.grid_sample(
+        obs_norm, grid,
+        align_corners=True,
+        mode="bilinear",
+        padding_mode="zeros",  # r > 1 → outside image → 0 → maps to -1
+    )
+
+    return sampled.reshape(N, 1, D, D, D) * 2.0 - 1.0
+
+
 # ── 3. Conditional velocity-field model ───────────────────────────────────────
 
 class ConditionalUNet3D(nn.Module):
@@ -589,8 +634,8 @@ def parse_args():
     p.add_argument("--coupled_fraction",  type=float, default=0.0,
                    help="Fraction of E-step batch using paired z from M-step")
     p.add_argument("--bootstrap",         type=str,   default="tile",
-                   choices=["tile", "noise"],
-                   help="π(0): tile y_obs to 3D depth, or random Gaussian noise")
+                   choices=["tile", "noise", "revolve"],
+                   help="π(0): tile y_obs along depth axis | Gaussian noise | revolve y_obs around y-axis (circle→sphere)")
     p.add_argument("--no_wandb",          action="store_true")
     p.add_argument("--debug",             action="store_true",
                    help="2 EM steps, tiny model, quick smoke test")
@@ -655,6 +700,8 @@ if __name__ == "__main__":
     if args.bootstrap == "tile":
         # Tile each 2D observation along the depth axis to form a 3D volume
         x_pool = y_obs.unsqueeze(2).expand(-1, -1, args.vol_size, -1, -1).clone()
+    elif args.bootstrap == "revolve":
+        x_pool = bootstrap_revolve(y_obs, args.vol_size)
     else:
         x_pool = torch.randn(N, 1, args.vol_size, args.vol_size, args.vol_size)
     z_pool = None
