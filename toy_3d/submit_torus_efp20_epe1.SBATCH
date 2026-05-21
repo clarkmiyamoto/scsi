@@ -18,4 +18,4 @@ uv run $TARGET_FILE \
     --epochs_first_pass 20 \
     --epochs_per_em 1 \
     --n_em_steps 400 \
-    --bootstrap revolve
+    --bootstrap noise
