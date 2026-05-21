@@ -16,4 +16,6 @@ uv run $TARGET_FILE \
     --shapes torus \
     --batch_size 64 \
     --epochs_first_pass 20 \
-    --epochs_per_em 2
+    --epochs_per_em 2 \
+    --n_em_steps 400 \
+    --bootstrap revolve
