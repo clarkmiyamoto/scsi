@@ -95,12 +95,82 @@ def _torus(grid_size, R, r, cx, cy, cz, device="cpu"):
     return (dist_from_ring <= r**2).float()
 
 
+def _torus_y_axis(grid_size, R, r, cx, cy, cz, device="cpu"):
+    """Torus whose symmetry axis is Y (ring lies in XZ plane)."""
+    xx, yy, zz = _make_grid(grid_size, device)
+    dist_from_ring = (torch.sqrt((xx - cx)**2 + (zz - cz)**2) - R)**2 + (yy - cy)**2
+    return (dist_from_ring <= r**2).float()
+
+
+
+def _helix(grid_size, R, pitch, n_turns, tube_radius, cx, cy, cz, device="cpu"):
+    """
+    Helix coiled around the Y-axis.
+    R: coil radius; pitch: height per full turn; n_turns: number of turns.
+    Samples the helix curve densely, then marks voxels within tube_radius.
+    """
+    xx, yy, zz = _make_grid(grid_size, device)
+    n_samples = max(400, grid_size ** 2)
+    t = torch.linspace(0.0, 2.0 * np.pi * n_turns, n_samples, device=device)
+    hx = R * torch.cos(t) + cx
+    hy = (pitch * t / (2.0 * np.pi) - pitch * n_turns / 2.0 + cy)
+    hz = R * torch.sin(t) + cz
+    # (D,D,D,n_samples) distance field; min over curve samples
+    dx = xx.unsqueeze(-1) - hx
+    dy = yy.unsqueeze(-1) - hy
+    dz = zz.unsqueeze(-1) - hz
+    dist_sq = (dx**2 + dy**2 + dz**2).min(dim=-1).values
+    return (dist_sq <= tube_radius**2).float()
+
+
+def _linked_rings(grid_size, R, r, cx, cy, cz, device="cpu"):
+    """
+    Two interlocked tori sharing the same center.
+    Ring 1: axis = Z (ring in XY plane).
+    Ring 2: axis = Y (ring in XZ plane).
+    Their main circles pass through each other's holes, topologically linking them.
+    """
+    t1 = _torus(grid_size, R, r, cx, cy, cz, device)
+    t2 = _torus_y_axis(grid_size, R, r, cx, cy, cz, device)
+    return (t1 + t2).clamp(0.0, 1.0)
+
+
+def _separated_rings(grid_size, R, r, offset, cx, cy, cz, device="cpu"):
+    """Two separate tori side-by-side along X, both with axis = Z."""
+    t1 = _torus(grid_size, R, r, cx - offset, cy, cz, device)
+    t2 = _torus(grid_size, R, r, cx + offset, cy, cz, device)
+    return (t1 + t2).clamp(0.0, 1.0)
+
+
+def _mickey_mouse(grid_size, R_head, R_ear, ear_dx, ear_dy, cx, cy, cz, device="cpu"):
+    """
+    Mickey Mouse head: large sphere (head) + two small spheres (ears) at top.
+    cx, cy, cz: center of the head sphere.
+    ear_dx: horizontal (X) offset of each ear from head center.
+    ear_dy: vertical (Y) offset of each ear above head center.
+    """
+    head  = _sphere(grid_size, R_head, cx, cy, cz, device)
+    ear_l = _sphere(grid_size, R_ear, cx - ear_dx, cy + ear_dy, cz, device)
+    ear_r = _sphere(grid_size, R_ear, cx + ear_dx, cy + ear_dy, cz, device)
+    return (head + ear_l + ear_r).clamp(0.0, 1.0)
+
+
+ALL_SHAPES = [
+    "sphere", "cube", "cylinder", "ellipsoid", "torus",
+    "helix", "linked_rings", "separated_rings", "mickey_mouse",
+]
+DEFAULT_SHAPES = ["torus", "helix", "linked_rings", "separated_rings", "mickey_mouse"]
+
+
 def generate_toy_dataset(
-    n_per_class: int = 50,
+    n_per_class: int = 2000,
     grid_size: int = 16,
     seed: int = 42,
+    shapes: list[str] | None = None,
 ) -> torch.Tensor:
-    """Return (N, 1, D, H, W) float32 in [-1, 1] with N = 5 * n_per_class."""
+    """Return (N, 1, D, H, W) float32 in [-1, 1] with N = len(shapes) * n_per_class."""
+    if shapes is None:
+        shapes = DEFAULT_SHAPES
     rng = np.random.default_rng(seed)
     jitter = 0.05
 
@@ -109,27 +179,52 @@ def generate_toy_dataset(
 
     volumes = []
 
-    for _ in range(n_per_class):
-        r = float(rng.uniform(0.30, 0.55))
-        volumes.append(_sphere(grid_size, r, jit(), jit(), jit()))
-
-    for _ in range(n_per_class):
-        a = float(rng.uniform(0.25, 0.50))
-        volumes.append(_cube(grid_size, a, jit(), jit(), jit()))
-
-    for _ in range(n_per_class):
-        r = float(rng.uniform(0.25, 0.45))
-        h = float(rng.uniform(0.30, 0.60))
-        volumes.append(_cylinder(grid_size, r, h, jit(), jit(), jit()))
-
-    for _ in range(n_per_class):
-        ra, rb, rc = (float(rng.uniform(0.20, 0.55)) for _ in range(3))
-        volumes.append(_ellipsoid(grid_size, ra, rb, rc, jit(), jit(), jit()))
-
-    for _ in range(n_per_class):
-        R = float(rng.uniform(0.35, 0.50))
-        r = float(rng.uniform(0.10, 0.20))
-        volumes.append(_torus(grid_size, R, r, jit(), jit(), jit()))
+    for shape in shapes:
+        for _ in range(n_per_class):
+            if shape == "sphere":
+                r = float(rng.uniform(0.30, 0.55))
+                volumes.append(_sphere(grid_size, r, jit(), jit(), jit()))
+            elif shape == "cube":
+                a = float(rng.uniform(0.25, 0.50))
+                volumes.append(_cube(grid_size, a, jit(), jit(), jit()))
+            elif shape == "cylinder":
+                r = float(rng.uniform(0.25, 0.45))
+                h = float(rng.uniform(0.30, 0.60))
+                volumes.append(_cylinder(grid_size, r, h, jit(), jit(), jit()))
+            elif shape == "ellipsoid":
+                ra, rb, rc = (float(rng.uniform(0.20, 0.55)) for _ in range(3))
+                volumes.append(_ellipsoid(grid_size, ra, rb, rc, jit(), jit(), jit()))
+            elif shape == "torus":
+                R = float(rng.uniform(0.38, 0.50))
+                r = float(rng.uniform(0.06, 0.11))
+                volumes.append(_torus(grid_size, R, r, jit(), jit(), jit()))
+            elif shape == "helix":
+                R       = float(rng.uniform(0.35, 0.45))
+                tube_r  = float(rng.uniform(0.09, 0.13))
+                n_turns = float(rng.uniform(2.0, 3.0))
+                pitch   = float(rng.uniform(0.40, 0.55))
+                volumes.append(_helix(grid_size, R, pitch, n_turns, tube_r,
+                                      jit(), jit(), jit()))
+            elif shape == "linked_rings":
+                R = float(rng.uniform(0.30, 0.40))
+                r = float(rng.uniform(0.09, 0.13))
+                volumes.append(_linked_rings(grid_size, R, r, jit(), jit(), jit()))
+            elif shape == "separated_rings":
+                R      = float(rng.uniform(0.20, 0.27))
+                r      = float(rng.uniform(0.08, 0.11))
+                offset = float(rng.uniform(0.32, 0.42))
+                volumes.append(_separated_rings(grid_size, R, r, offset,
+                                                jit(), jit(), jit()))
+            elif shape == "mickey_mouse":
+                R_head = float(rng.uniform(0.26, 0.32))
+                R_ear  = float(rng.uniform(0.13, 0.17))
+                ear_dx = float(rng.uniform(0.24, 0.30))
+                ear_dy = float(rng.uniform(0.28, 0.34))
+                # shift head center down so ears don't clip the top of the grid
+                volumes.append(_mickey_mouse(grid_size, R_head, R_ear, ear_dx, ear_dy,
+                                             jit(), jit() - 0.10, jit()))
+            else:
+                raise ValueError(f"Unknown shape: {shape!r}")
 
     x = torch.stack(volumes, dim=0).unsqueeze(1).float()
     x = x * 2.0 - 1.0
@@ -615,7 +710,13 @@ def make_rotation_movie(
 
 def parse_args():
     p = argparse.ArgumentParser(description="toy_3d SCSI: unsupervised CryoEM 3D via EM")
-    p.add_argument("--n_per_class",       type=int,   default=50)
+    p.add_argument("--n_per_class",       type=int,   default=2000)
+    p.add_argument("--shapes",            nargs="+",  default=DEFAULT_SHAPES,
+                   choices=ALL_SHAPES,
+                   metavar="SHAPE",
+                   help=("Ordered list of shape classes to include. "
+                         f"Choices: {ALL_SHAPES}. "
+                         f"Default: {DEFAULT_SHAPES}"))
     p.add_argument("--vol_size",          type=int,   default=16)
     p.add_argument("--n_em_steps",        type=int,   default=50)
     p.add_argument("--epochs_first_pass", type=int,   default=10,
@@ -679,7 +780,12 @@ if __name__ == "__main__":
 
     # ── Dataset ────────────────────────────────────────────────────────────────
     print("Generating toy dataset ...")
-    x_gt = generate_toy_dataset(n_per_class=args.n_per_class, grid_size=args.vol_size)
+    print(f"  shapes={args.shapes}  n_per_class={args.n_per_class}")
+    x_gt = generate_toy_dataset(
+        n_per_class=args.n_per_class,
+        grid_size=args.vol_size,
+        shapes=args.shapes,
+    )
     N    = x_gt.size(0)
     print(f"  {N} volumes  shape={tuple(x_gt.shape)}")
 
@@ -690,8 +796,9 @@ if __name__ == "__main__":
     print(f"  y_obs shape={tuple(y_obs.shape)}"
           f"  range=[{y_obs.min():.2f}, {y_obs.max():.2f}]")
 
-    # Evaluation slice: one shape per class
-    class_indices = [c * args.n_per_class for c in range(min(5, args.n_per_class))]
+    # Evaluation slice: one sample per shape class
+    n_classes     = len(args.shapes)
+    class_indices = [c * args.n_per_class for c in range(n_classes)]
     class_indices = class_indices[:args.n_eval]
     x_eval = x_gt[class_indices]
     y_eval = y_obs[class_indices]
