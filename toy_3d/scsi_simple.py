@@ -138,7 +138,6 @@ def generate_toy_dataset(
 
 def _apply_rotation(x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
     grid = F.affine_grid(theta, x.shape, align_corners=True)
-    grid = torch.remainder(grid + 1.0, 2.0) - 1.0
     return F.grid_sample(x, grid, align_corners=True, mode="bilinear", padding_mode="border")
 
 
@@ -465,11 +464,17 @@ def log_em_step(
 
 def parse_args():
     p = argparse.ArgumentParser(description="toy_3d SCSI: unsupervised CryoEM 3D via EM")
+    # Problem setup
     p.add_argument("--n_per_class",       type=int,   default=2000)
+    p.add_argument("--noise_std",         type=float, default=0.3)
     p.add_argument("--shapes",            nargs="+",  default=DEFAULT_SHAPES,
                    choices=ALL_SHAPES, metavar="SHAPE",
                    help=f"Shape classes. Choices: {ALL_SHAPES}. Default: {DEFAULT_SHAPES}")
     p.add_argument("--vol_size",          type=int,   default=16)
+    p.add_argument("--supervised",        action="store_true",
+                   help="Supervised baseline: train on (x_gt, F(x_gt)); M-step regenerates F(x_gt).")
+
+    # EM setup
     p.add_argument("--n_em_steps",        type=int,   default=50)
     p.add_argument("--epochs_first_pass", type=int,   default=10,
                    help="E-step epochs for EM iteration 0")
@@ -477,15 +482,14 @@ def parse_args():
                    help="E-step epochs for EM iterations 1+")
     p.add_argument("--batch_size",        type=int,   default=128)
     p.add_argument("--lr",                type=float, default=3e-4)
-    p.add_argument("--noise_std",         type=float, default=0.3)
     p.add_argument("--sample_steps",      type=int,   default=50)
-    p.add_argument("--n_eval",            type=int,   default=5,
-                   help="Number of eval samples (one per shape class)")
     p.add_argument("--bootstrap",         type=str,   default="tile",
                    choices=["tile", "noise", "revolve"],
                    help="π(0): tile y_obs along depth | Gaussian noise | revolve around y-axis")
-    p.add_argument("--supervised",        action="store_true",
-                   help="Supervised baseline: train on (x_gt, F(x_gt)); M-step regenerates F(x_gt).")
+
+    # Visualization / evaluation
+    p.add_argument("--n_eval",            type=int,   default=5,
+                   help="Number of eval samples (one per shape class)")
     p.add_argument("--no_wandb",          action="store_true")
     p.add_argument("--debug",             action="store_true",
                    help="2 EM steps, tiny model, quick smoke test")
