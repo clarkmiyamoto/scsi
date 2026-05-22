@@ -475,7 +475,7 @@ def parse_args():
                    help="E-step epochs for EM iteration 0")
     p.add_argument("--epochs_per_em",     type=int,   default=2,
                    help="E-step epochs for EM iterations 1+")
-    p.add_argument("--batch_size",        type=int,   default=32)
+    p.add_argument("--batch_size",        type=int,   default=128)
     p.add_argument("--lr",                type=float, default=3e-4)
     p.add_argument("--noise_std",         type=float, default=0.3)
     p.add_argument("--sample_steps",      type=int,   default=50)
