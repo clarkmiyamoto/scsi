@@ -41,6 +41,7 @@ except ImportError:
         return it
 
 INTEGRATION_SCALE = 999
+MAX_ALPHA = 0.85  # voxels never become fully opaque
 
 
 # ── 1. Shape generation ────────────────────────────────────────────────────────
@@ -353,9 +354,23 @@ def update_prior(
 
 # ── 9. Visualization ──────────────────────────────────────────────────────────
 
-def _mip(vol: torch.Tensor) -> np.ndarray:
-    """Max-intensity projection along depth axis. (D,H,W) → (H,W) numpy."""
-    return vol.float().cpu().numpy().max(axis=0)
+def _show_voxels(ax, vol: torch.Tensor) -> None:
+    """Render a (D,H,W) volume as translucent voxels; float intensity → alpha, capped at MAX_ALPHA."""
+    vol_np = vol.float().cpu().numpy()
+    vmin, vmax = vol_np.min(), vol_np.max()
+    vol_norm = (vol_np - vmin) / (vmax - vmin + 1e-8)  # [0, 1]
+
+    filled = vol_norm > 0.1  # skip near-background voxels
+
+    rgba = np.zeros((*vol_np.shape, 4))
+    rgba[filled, 0] = 0.27  # steelblue
+    rgba[filled, 1] = 0.51
+    rgba[filled, 2] = 0.71
+    rgba[filled, 3] = np.clip(vol_norm[filled] * MAX_ALPHA, 0.0, MAX_ALPHA)
+
+    ax.voxels(filled, facecolors=rgba, edgecolors="none", shade=False)
+    ax.view_init(elev=25, azim=45)
+    ax.set_axis_off()
 
 
 def log_em_step(
@@ -366,21 +381,34 @@ def log_em_step(
     em_step: int,
     use_wandb: bool,
     n_cols: int = 6,
+    global_step: int | None = None,
 ) -> None:
     """
-    4-row panel:
-      Row 0 — GT MIP               [visual reference only]
+    4-row panel with a rightmost histogram column showing intensity distribution:
+      Row 0 — GT voxels             [visual reference only]
       Row 1 — CryoEM observation y_obs
-      Row 2 — Pool sample x_pool[i] MIP
+      Row 2 — Pool sample x_pool[i] voxels
       Row 3 — F(x_pool[i])          (consistency check)
     """
     n = min(n_cols, x_gt.size(0))
     with torch.no_grad():
         y_pool = forward_channel(x_pool[:n].cpu(), noise_std)
 
-    row_labels = ["GT (MIP)", "Obs y_obs", f"π({em_step}) sample", "F(pool)"]
-    fig, axes = plt.subplots(len(row_labels), n, figsize=(2.2 * n, 2.2 * len(row_labels)),
-                             squeeze=False)
+    row_labels = ["GT (3D)", "Obs y_obs", f"π({em_step}) (3D)", "F(pool)"]
+    n_rows = len(row_labels)
+    _3D_ROWS = {0, 2}
+    n_cols_total = n + 1  # sample columns + 1 histogram column
+
+    # plt.subplots can't mix projections — build axes manually
+    fig = plt.figure(figsize=(2.5 * n_cols_total, 2.5 * n_rows))
+    axes = [
+        [
+            fig.add_subplot(n_rows, n_cols_total, r * n_cols_total + j + 1,
+                            projection="3d" if r in _3D_ROWS else None)
+            for j in range(n)
+        ] + [fig.add_subplot(n_rows, n_cols_total, r * n_cols_total + n + 1)]
+        for r in range(n_rows)
+    ]
 
     def _show(ax, img2d):
         data = img2d if isinstance(img2d, np.ndarray) else img2d.float().cpu().numpy()
@@ -391,19 +419,41 @@ def log_em_step(
         ax.axis("off")
 
     for j in range(n):
-        _show(axes[0, j], _mip(x_gt[j, 0]))
-        _show(axes[1, j], y_obs[j, 0].float().cpu().numpy())
-        _show(axes[2, j], _mip(x_pool[j, 0]))
-        _show(axes[3, j], y_pool[j, 0].float().cpu().numpy())
+        _show_voxels(axes[0][j], x_gt[j, 0])
+        _show(axes[1][j], y_obs[j, 0].float().cpu().numpy())
+        _show_voxels(axes[2][j], x_pool[j, 0])
+        _show(axes[3][j], y_pool[j, 0].float().cpu().numpy())
+
+    # Histograms: aggregate all sample values across the n columns per row
+    row_data = [
+        np.concatenate([x_gt[j, 0].float().cpu().numpy().ravel()   for j in range(n)]),
+        np.concatenate([y_obs[j, 0].float().cpu().numpy().ravel()   for j in range(n)]),
+        np.concatenate([x_pool[j, 0].float().cpu().numpy().ravel()  for j in range(n)]),
+        np.concatenate([y_pool[j, 0].float().cpu().numpy().ravel()  for j in range(n)]),
+    ]
+    for r, data in enumerate(row_data):
+        ax_h = axes[r][n]
+        ax_h.hist(data, bins=50, color="steelblue", alpha=0.8, density=True)
+        ax_h.set_xlabel("intensity", fontsize=7)
+        ax_h.set_ylabel("density", fontsize=7)
+        ax_h.tick_params(labelsize=6)
+        ax_h.spines[["top", "right"]].set_visible(False)
 
     for r, label in enumerate(row_labels):
-        axes[r, 0].set_ylabel(label, fontsize=8, rotation=0, labelpad=65, va="center")
+        ax0 = axes[r][0]
+        kwargs = dict(transform=ax0.transAxes, fontsize=9,
+                      va="center", ha="right", fontweight="bold")
+        if r in _3D_ROWS:
+            ax0.text2D(-0.05, 0.5, label, **kwargs)
+        else:
+            ax0.text(-0.05, 0.5, label, **kwargs)
 
-    fig.suptitle(f"EM step {em_step}", fontsize=11, y=1.01)
-    plt.tight_layout()
+    fig.suptitle(f"EM step {em_step}", fontsize=11)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
 
     if use_wandb:
-        wandb.log({"em/panel": wandb.Image(fig)}, step=em_step)
+        step = global_step if global_step is not None else em_step
+        wandb.log({"em/panel": wandb.Image(fig), "em/step": em_step}, step=step)
     else:
         out = Path("toy3d_eval")
         out.mkdir(exist_ok=True)
@@ -552,15 +602,13 @@ if __name__ == "__main__":
         )
         _empty_cache()
 
-        if use_wandb:
-            wandb.log({"em/step": k}, step=k)
-
         log_em_step(
             x_eval, y_eval, x_pool[class_indices],
             noise_std=args.noise_std,
             em_step=k,
             use_wandb=use_wandb,
             n_cols=len(class_indices),
+            global_step=global_step[0],
         )
 
     if use_wandb:
