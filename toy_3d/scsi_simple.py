@@ -506,6 +506,9 @@ if __name__ == "__main__":
         args.sample_steps      = 5
         args.n_eval            = 4
 
+    if args.supervised:
+        args.epochs_first_pass = 0
+
     if torch.cuda.is_available():
         device = torch.device("cuda")
         torch.backends.cudnn.benchmark = True
@@ -545,15 +548,6 @@ if __name__ == "__main__":
     x_eval = x_gt[class_indices]
     y_eval = y_obs[class_indices]
 
-    # Initial pool
-    if args.supervised:
-        x_pool = x_gt.clone()
-        print("Supervised mode: x_pool = x_gt (fixed). M-step will refresh F(x_gt).")
-    else:
-        print(f"Bootstrap π(0): {args.bootstrap} ...")
-        x_pool = make_bootstrap(args.bootstrap, y_obs, args.vol_size)
-        print(f"  x_pool shape={tuple(x_pool.shape)}")
-
     # Model
     small_channels = (32, 64, 128) if not args.debug else (16, 32)
     model = ConditionalUNet3D(vol_size=args.vol_size,
@@ -573,19 +567,64 @@ if __name__ == "__main__":
     ckpt_dir.mkdir(exist_ok=True)
     global_step = [0]
 
+    # Initial pool
+    if args.epochs_first_pass > 0:
+        print(f"Bootstrap π(0): {args.bootstrap} ...")
+        x_pool = make_bootstrap(args.bootstrap, y_obs, args.vol_size)
+        print(f"  x_pool shape={tuple(x_pool.shape)}")
+        train_estep(
+            model, x_pool,
+            noise_std=args.noise_std,
+            epochs=args.epochs_first_pass,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            device=device,
+            use_amp=use_amp,
+            scaler=scaler,
+            global_step=global_step,
+            use_wandb=use_wandb,
+        )
+        # supervised-style visualization: what did the model learn from bootstrap?
+        print("  Visualizing first-pass model predictions ...")
+        x_log_fp = sample_euler(
+            model, y_eval.to(device), args.vol_size, n_steps=args.sample_steps,
+        ).cpu()
+        log_em_step(
+            x_eval, y_eval, x_log_fp,
+            noise_std=args.noise_std,
+            em_step=0,
+            use_wandb=use_wandb,
+            n_cols=len(class_indices),
+            global_step=global_step[0],
+        )
+        # x_pool stays as bootstrap — EM loop starts from here
+    elif (args.epochs_first_pass == 0):
+        if args.supervised: # supervised mode
+            x_pool = x_gt.clone()
+            print("Supervised mode: x_pool = x_gt (fixed). M-step will refresh F(x_gt).")
+        else: # unsupervised mode
+            x_pool = update_prior(
+                model, y_obs,
+                vol_size=args.vol_size,
+                n_steps=args.sample_steps,
+                batch_size=args.batch_size * 3,
+                device=device,
+            )
+            print("Unsupervised mode: x_pool = flow result from neural network initialization ...")
+    else:
+        raise ValueError(f"Something went wrong with the initial pool settings: epochs_first_pass={args.epochs_first_pass} supervised={args.supervised}")
+
     # EM loop
     for k in range(args.n_em_steps):
         print("=" * 60)
         print(f"EM iteration {k} / {args.n_em_steps}")
         print("=" * 60)
-
-        epochs = args.epochs_first_pass if k == 0 else args.epochs_per_em
-
+        
         # E-step
         train_estep(
             model, x_pool,
             noise_std=args.noise_std,
-            epochs=epochs,
+            epochs=args.epochs_per_em,
             batch_size=args.batch_size,
             lr=args.lr,
             device=device,
@@ -623,7 +662,7 @@ if __name__ == "__main__":
         log_em_step(
             x_eval, y_eval, x_log,
             noise_std=args.noise_std,
-            em_step=k,
+            em_step=k + 1,
             use_wandb=use_wandb,
             n_cols=len(class_indices),
             global_step=global_step[0],

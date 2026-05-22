@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sphere_efp50_epe5
+#SBATCH --job-name=sphere_efp30_epe7
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
@@ -15,7 +15,7 @@ cd /scratch/cm6627/scsi/$REPO_DIR
 uv run $TARGET_FILE \
     --shapes sphere \
     --batch_size 64 \
-    --epochs_first_pass 50 \
-    --epochs_per_em 5 \
+    --epochs_first_pass 30 \
+    --epochs_per_em 7 \
     --n_em_steps 400 \
     --bootstrap revolve
