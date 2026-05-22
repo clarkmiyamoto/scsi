@@ -484,6 +484,8 @@ def parse_args():
     p.add_argument("--bootstrap",         type=str,   default="tile",
                    choices=["tile", "noise", "revolve"],
                    help="π(0): tile y_obs along depth | Gaussian noise | revolve around y-axis")
+    p.add_argument("--supervised",        action="store_true",
+                   help="Supervised baseline: train on (x_gt, F(x_gt)); M-step regenerates F(x_gt).")
     p.add_argument("--no_wandb",          action="store_true")
     p.add_argument("--debug",             action="store_true",
                    help="2 EM steps, tiny model, quick smoke test")
@@ -543,10 +545,14 @@ if __name__ == "__main__":
     x_eval = x_gt[class_indices]
     y_eval = y_obs[class_indices]
 
-    # Bootstrap π(0)
-    print(f"Bootstrap π(0): {args.bootstrap} ...")
-    x_pool = make_bootstrap(args.bootstrap, y_obs, args.vol_size)
-    print(f"  x_pool shape={tuple(x_pool.shape)}")
+    # Initial pool
+    if args.supervised:
+        x_pool = x_gt.clone()
+        print("Supervised mode: x_pool = x_gt (fixed). M-step will refresh F(x_gt).")
+    else:
+        print(f"Bootstrap π(0): {args.bootstrap} ...")
+        x_pool = make_bootstrap(args.bootstrap, y_obs, args.vol_size)
+        print(f"  x_pool shape={tuple(x_pool.shape)}")
 
     # Model
     small_channels = (32, 64, 128) if not args.debug else (16, 32)
@@ -592,18 +598,30 @@ if __name__ == "__main__":
         print(f"  checkpoint saved → {ckpt_dir}/model_em{k:04d}.pt")
 
         # M-step
-        print(f"\n  M-step: sampling π({k+1}) ...")
-        x_pool = update_prior(
-            model, y_obs,
-            vol_size=args.vol_size,
-            n_steps=args.sample_steps,
-            batch_size=args.batch_size * 3,
-            device=device,
-        )
+        if args.supervised:
+            print(f"\n  M-step (supervised): refreshing y_obs = F(x_gt) ...")
+            with torch.no_grad():
+                y_obs = forward_channel(x_gt, noise_std=args.noise_std)
+            y_eval = y_obs[class_indices]
+            print(f"  Sampling model predictions for visualization ...")
+            x_log = sample_euler(
+                model, y_eval.to(device), args.vol_size, n_steps=args.sample_steps,
+            ).cpu()
+        else:
+            print(f"\n  M-step: sampling π({k+1}) ...")
+            x_pool = update_prior(
+                model, y_obs,
+                vol_size=args.vol_size,
+                n_steps=args.sample_steps,
+                batch_size=args.batch_size * 3,
+                device=device,
+            )
+            x_log = x_pool[class_indices]
+
         _empty_cache()
 
         log_em_step(
-            x_eval, y_eval, x_pool[class_indices],
+            x_eval, y_eval, x_log,
             noise_std=args.noise_std,
             em_step=k,
             use_wandb=use_wandb,
