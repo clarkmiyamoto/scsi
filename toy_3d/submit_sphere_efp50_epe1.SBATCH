@@ -1,21 +1,21 @@
 #!/bin/bash
-#SBATCH --job-name=torus_efp20_epe10
+#SBATCH --job-name=sphere_efp50_epe1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=08:00:00
+#SBATCH --time=04:00:00
 
 REPO_DIR=toy_3d
-TARGET_FILE=scsi_train.py
+TARGET_FILE=scsi_simple.py
 
 cd /scratch/cm6627/scsi/$REPO_DIR
 
 uv run $TARGET_FILE \
-    --shapes torus \
+    --shapes sphere \
     --batch_size 64 \
-    --epochs_first_pass 20 \
-    --epochs_per_em 10 \
+    --epochs_first_pass 50 \
+    --epochs_per_em 1 \
     --n_em_steps 400 \
-    --bootstrap noise
+    --bootstrap revolve
