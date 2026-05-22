@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=sphere_efp150_epe7
+#SBATCH --job-name=helix_efp150_epe7
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
@@ -13,7 +13,7 @@ TARGET_FILE=scsi_simple.py
 cd /scratch/cm6627/scsi/$REPO_DIR
 
 uv run $TARGET_FILE \
-    --shapes sphere \
+    --shapes helix \
     --batch_size 64 \
     --epochs_first_pass 150 \
     --epochs_per_em 7 \
