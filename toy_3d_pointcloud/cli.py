@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument(
         "--supervised", action="store_true",
         help="debug oracle: train directly on (x, F(x)) with unlimited fresh ground "
-             "truth instead of EM (ignores --n-objects/--em-steps/--epochs-*/"
+             "truth instead of EM (ignores --n-objects/--em-steps/--epochs-per-em/"
              "--bootstrap/--perturb-*/--pretrain-steps/--coupled-fraction; "
              "uses --steps/--eval-every)",
     )
@@ -105,8 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--eval-every", type=int, default=500, help="[supervised] eval panel cadence")
     pe.add_argument("--n-objects", type=int, default=128, help="number of observations (|p_corrupted|)")
     pe.add_argument("--em-steps", type=int, default=30)
-    pe.add_argument("--epochs-first", type=int, default=10, help="E-step epochs at EM iter 0")
-    pe.add_argument("--epochs-per-em", type=int, default=2, help="E-step epochs at EM iters 1+")
+    pe.add_argument("--epochs-per-em", type=int, default=2, help="E-step epochs per EM iteration")
     pe.add_argument("--batch", type=int, default=32)
     pe.add_argument("--lr", type=float, default=2e-4)
     pe.add_argument("--radius", type=float, default=0.08, help="ball radius for the channel F")
@@ -225,7 +224,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.debug:
             args.dim, args.depth, args.heads = 64, 2, 4
             args.n_objects, args.n_points = 8, 128
-            args.em_steps, args.epochs_first, args.epochs_per_em = 2, 1, 1
+            args.em_steps, args.epochs_per_em = 2, 1
             args.batch, args.sample_steps, args.n_eval = 4, 5, 4
             args.steps, args.eval_every = 20, 10
             args.pretrain_steps = 10
@@ -257,7 +256,7 @@ def main(argv: list[str] | None = None) -> None:
                 scsi_train(
                     device=device, cfg=cfg,
                     n_objects=args.n_objects, em_steps=args.em_steps,
-                    epochs_first=args.epochs_first, epochs_per_em=args.epochs_per_em,
+                    epochs_per_em=args.epochs_per_em,
                     batch=args.batch, lr=args.lr,
                     radius=args.radius, noise_std=args.noise_std, extent=args.extent,
                     sample_steps=args.sample_steps, coupled_fraction=args.coupled_fraction,

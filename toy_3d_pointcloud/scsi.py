@@ -393,7 +393,6 @@ def scsi_train(
     cfg: ConditionalModelConfig,
     n_objects: int = 128,
     em_steps: int = 30,
-    epochs_first: int = 10,
     epochs_per_em: int = 2,
     batch: int = 32,
     lr: float = 2e-4,
@@ -460,13 +459,12 @@ def scsi_train(
         print("=" * 60)
         print(f"EM iteration {k} / {em_steps}")
         print("=" * 60)
-        epochs = epochs_first if k == 0 else epochs_per_em
 
         train_estep(
             model, x_pool, z_pool, coupled_fraction,
             radius=radius, noise_std=noise_std,
             image_size=cfg.image_size, extent=extent,
-            epochs=epochs, batch=batch, lr=lr,
+            epochs=epochs_per_em, batch=batch, lr=lr,
             device=device, use_amp=use_amp,
             global_step=global_step, tracker=tracker,
         )
