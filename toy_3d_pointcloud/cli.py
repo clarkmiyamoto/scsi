@@ -98,7 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--supervised", action="store_true",
         help="debug oracle: train directly on (x, F(x)) with unlimited fresh ground "
              "truth instead of EM (ignores --n-objects/--em-steps/--epochs-*/"
-             "--bootstrap/--perturb-*/--coupled-fraction; uses --steps/--eval-every)",
+             "--bootstrap/--perturb-*/--pretrain-steps/--coupled-fraction; "
+             "uses --steps/--eval-every)",
     )
     pe.add_argument("--steps", type=int, default=4000, help="[supervised] gradient steps")
     pe.add_argument("--eval-every", type=int, default=500, help="[supervised] eval panel cadence")
@@ -119,12 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="warmstart pi(0); see prior.py for the registry",
     )
     pe.add_argument(
-        "--perturb-std", type=float, default=0.3,
-        help="[bootstrap=perturbed] Gaussian noise scale added to the dataset object",
+        "--perturb-shape", choices=available_shapes(), default="torus",
+        help="[bootstrap=perturbed] base object whose random rotations are learned",
     )
     pe.add_argument(
-        "--perturb-shape", choices=available_shapes(), default="torus",
-        help="[bootstrap=perturbed] dataset object to perturb away from",
+        "--perturb-std", type=float, default=0.0,
+        help="[bootstrap=perturbed] optional 3D jitter on the targets (0 = clean)",
+    )
+    pe.add_argument(
+        "--pretrain-steps", type=int, default=2000,
+        help="[bootstrap=perturbed] flow-matching steps to pre-train pi(0) before EM",
     )
     pe.add_argument("--n-eval", type=int, default=4, help="objects shown in eval panels")
     pe.add_argument("--seed", type=int, default=0)
@@ -223,6 +228,7 @@ def main(argv: list[str] | None = None) -> None:
             args.em_steps, args.epochs_first, args.epochs_per_em = 2, 1, 1
             args.batch, args.sample_steps, args.n_eval = 4, 5, 4
             args.steps, args.eval_every = 20, 10
+            args.pretrain_steps = 10
 
         cfg = ConditionalModelConfig(
             dim=args.dim, depth=args.depth, heads=args.heads,
@@ -256,7 +262,8 @@ def main(argv: list[str] | None = None) -> None:
                     radius=args.radius, noise_std=args.noise_std, extent=args.extent,
                     sample_steps=args.sample_steps, coupled_fraction=args.coupled_fraction,
                     bootstrap=args.bootstrap, perturb_std=args.perturb_std,
-                    perturb_shape=args.perturb_shape, n_eval=args.n_eval,
+                    perturb_shape=args.perturb_shape, pretrain_steps=args.pretrain_steps,
+                    n_eval=args.n_eval,
                     use_amp=not args.no_amp, seed=args.seed,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
                     viz_ball_radius=args.viz_ball_radius,

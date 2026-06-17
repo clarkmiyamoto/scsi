@@ -24,6 +24,7 @@ from .prior import (
 from .scsi import (
     ConditionalModelConfig,
     build_conditional_model,
+    pretrain_rotation_prior,
     scsi_train,
     train_supervised,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "ConditionalPointCloudVelocity",
     "ConditionalModelConfig",
     "build_conditional_model",
+    "pretrain_rotation_prior",
     "scsi_train",
     "train_supervised",
 ]

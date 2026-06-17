@@ -15,19 +15,25 @@ Add a bootstrap::
 The CLI ``--bootstrap`` choices are generated from :func:`available_bootstraps`,
 so registering here is all that's needed to expose it.
 
-The ``perturbed`` bootstrap starts from the dataset object (a torus) and pushes
-it off-surface by Gaussian noise. The object it perturbs away from is one entry
-in :data:`SHAPES` -- add an entry (or pass ``--perturb-shape``) to perturb from a
-different object without touching the bootstrap itself.
+The ``perturbed`` bootstrap pre-trains the conditional velocity field to generate
+random SO(3) rotations of the dataset object, conditioned on their projections
+``F(x)``, then samples pi(0) from it (see :func:`scsi.pretrain_rotation_prior`).
+The object it rotates is one entry in :data:`SHAPES` -- add an entry (or pass
+``--perturb-shape``) to start from a different object without touching the bootstrap.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import torch
 
 from .data import sample_torus
+
+if TYPE_CHECKING:  # annotations only; avoids importing heavy / cyclic deps at runtime
+    import torch.nn as nn
+
+    from .tracking import Tracker
 
 # ── shapes the "perturbed" bootstrap can start from ──────────────────────────
 # name -> sampler with signature (batch, n_points) -> (batch, n_points, 3) on CPU.
@@ -42,8 +48,9 @@ SHAPES: dict[str, ShapeFn] = {
 class BootstrapContext:
     """Everything a bootstrap might need to build pi(0).
 
-    Not every field is used by every bootstrap (e.g. ``noise`` ignores ``y_obs``);
-    bundling them keeps the registry signature uniform and future-proof.
+    Not every field is used by every bootstrap (e.g. ``noise`` ignores ``y_obs``,
+    and only ``perturbed`` uses the ``model`` / pre-training fields); bundling them
+    keeps the registry signature uniform and future-proof.
     """
 
     y_obs: torch.Tensor          # (Nobj, 1, P, P) frozen observations
@@ -51,8 +58,22 @@ class BootstrapContext:
     n_points: int                # points per cloud (N)
     extent: float                # world half-extent mapped to the image
     seed: int
-    perturb_std: float = 0.3     # noise scale for the "perturbed" bootstrap
-    perturb_shape: str = "torus"  # which SHAPES entry "perturbed" starts from
+    perturb_shape: str = "torus"  # which SHAPES entry "perturbed" rotates / starts from
+    perturb_std: float = 0.0     # optional 3D jitter on "perturbed" targets (0 = clean)
+
+    # ── fields used only by the "perturbed" pre-trained generator ────────────
+    model: "nn.Module | None" = None        # velocity net to pre-train (weights kept)
+    device: "torch.device | None" = None
+    radius: float = 0.08         # ball radius for the channel F
+    noise_std: float = 0.1       # AWGN std on the projections F(x)
+    image_size: int = 32         # projection size P
+    pretrain_steps: int = 2000   # flow-matching steps before EM
+    batch: int = 64
+    lr: float = 2e-4
+    sample_steps: int = 50       # Euler ODE steps used to draw pi(0)
+    use_amp: bool = True
+    tracker: "Tracker | None" = None
+    global_step: "list | None" = None  # shared wandb step counter (kept monotonic)
 
 
 BootstrapFn = Callable[[BootstrapContext], torch.Tensor]
@@ -90,26 +111,38 @@ def _noise(ctx: BootstrapContext) -> torch.Tensor:
 
 @register("perturbed")
 def _perturbed(ctx: BootstrapContext) -> torch.Tensor:
-    """pi(0) = (fresh samples of the dataset object) + Gaussian noise.
+    """pi(0) from a generator pre-trained on random rotations of the dataset object.
 
-    Starts from ``perturb_shape`` (default the torus the data lives on) and
-    pushes it off-surface by ``perturb_std`` -- a warmstart that already knows the
-    rough geometry. Swap the object via :data:`SHAPES` / ``--perturb-shape``.
+    Trains ``ctx.model`` (flow matching) to generate random SO(3) rotations of the
+    base object coupled to their projections ``F(x)`` -- F uses its own fresh random
+    pose -- then samples pi(0) from it on the real observations. The pre-trained
+    weights are kept and warm-start the EM model. Swap the base object via
+    :data:`SHAPES` / ``--perturb-shape``; ``perturb_std`` adds optional 3D jitter.
     """
+    if ctx.model is None or ctx.device is None:
+        raise ValueError(
+            "the 'perturbed' bootstrap pre-trains a model; ctx.model and ctx.device "
+            "must be set"
+        )
     if ctx.perturb_shape not in SHAPES:
         raise ValueError(
             f"unknown perturb_shape {ctx.perturb_shape!r}; "
             f"choose from {available_shapes()}"
         )
-    shape_fn = SHAPES[ctx.perturb_shape]
-    # sample_torus draws from the global RNG; fork so the bootstrap is reproducible
-    # from ctx.seed alone without disturbing the caller's RNG stream.
-    with torch.random.fork_rng(devices=[]):
-        torch.manual_seed(ctx.seed)
-        clean = shape_fn(ctx.n_objects, ctx.n_points)    # (Nobj, N, 3) on CPU
-    g = torch.Generator().manual_seed(ctx.seed)
-    noise = torch.randn(clean.shape, generator=g) * ctx.perturb_std
-    return clean + noise
+    # Lazy import: the training routine lives with the rest of the training stack in
+    # scsi.py; importing it at call time avoids an import cycle.
+    from .scsi import pretrain_rotation_prior
+
+    return pretrain_rotation_prior(
+        ctx.model, ctx.y_obs,
+        shape_fn=SHAPES[ctx.perturb_shape],
+        n_points=ctx.n_points, radius=ctx.radius, noise_std=ctx.noise_std,
+        image_size=ctx.image_size, extent=ctx.extent,
+        steps=ctx.pretrain_steps, batch=ctx.batch, lr=ctx.lr,
+        sample_steps=ctx.sample_steps, perturb_std=ctx.perturb_std,
+        device=ctx.device, use_amp=ctx.use_amp, seed=ctx.seed,
+        tracker=ctx.tracker, global_step=ctx.global_step,
+    )
 
 
 def available_bootstraps() -> list[str]:

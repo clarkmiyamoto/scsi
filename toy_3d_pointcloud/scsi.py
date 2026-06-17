@@ -18,6 +18,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -25,7 +26,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from .balls import save_balls_obj
-from .corruption import forward_channel
+from .corruption import forward_channel, random_so3
 from .data import sample_torus, torus_surface_residual
 from .device import autocast, configure_backends, describe, needs_grad_scaler, synchronize
 from .model import ConditionalPointCloudVelocity
@@ -293,6 +294,97 @@ def log_em_step(
         tracker.log({"eval/surface_residual": resid}, step=global_step[0])
 
 
+# ── Bootstrap: pre-trained rotation prior ──────────────────────────────────────
+
+
+def pretrain_rotation_prior(
+    model: nn.Module,
+    y_obs: torch.Tensor,                 # (Nobj, 1, P, P) real observations — CPU
+    *,
+    shape_fn: Callable[..., torch.Tensor],
+    n_points: int,
+    radius: float,
+    noise_std: float,
+    image_size: int,
+    extent: float,
+    steps: int,
+    batch: int,
+    lr: float,
+    sample_steps: int,
+    device: torch.device,
+    use_amp: bool,
+    seed: int,
+    perturb_std: float = 0.0,
+    tracker: Tracker | None = None,
+    global_step: list | None = None,
+) -> torch.Tensor:
+    """Warmstart pi(0): pre-train ``model`` to generate random SO(3) rotations of the
+    base object conditioned on F(x), then sample pi(0) on the real observations.
+
+    Each step draws fresh canonical clouds from ``shape_fn``, rotates each by an
+    independent random SO(3) matrix, renders ``y = F(rotated)`` with F's own fresh
+    random pose (the marginalize-over-pose channel), and takes a flow-matching step
+    on the pair ``(rotated, y)``. Rotating the *target* is what lets the recovered
+    prior cover all orientations instead of collapsing to the canonical frame. The
+    trained weights are kept -- they warm-start the EM model. ``perturb_std`` adds
+    optional 3D jitter to the targets (0 = clean). Returns x_pool (Nobj, N, 3) CPU.
+    """
+    torch.manual_seed(seed)
+    print(f"[scsi] bootstrap pre-training: {steps} flow-matching steps on random "
+          f"rotations of the base object")
+
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=1e-4, fused=(device.type == "cuda")
+    )
+    use_scaler = needs_grad_scaler(device, use_amp)
+    scaler = torch.amp.GradScaler(enabled=use_scaler)
+
+    model.train()
+    for step in range(1, steps + 1):
+        x1 = shape_fn(batch, n_points, device=device)        # canonical clouds
+        R = random_so3(batch, device)
+        x1 = torch.matmul(x1, R.transpose(-1, -2))           # random rotation per cloud
+        if perturb_std > 0:
+            x1 = x1 + perturb_std * torch.randn_like(x1)
+        with torch.no_grad():
+            y = forward_channel(
+                x1, radius=radius, noise_std=noise_std,
+                image_size=image_size, extent=extent,
+            )                                                # fresh random pose in F
+        z = torch.randn_like(x1)
+
+        with autocast(device, use_amp):
+            t = torch.rand(batch, device=device)
+            tt = t[:, None, None]
+            xt = (1.0 - tt) * z + tt * x1                    # I_t  (linear interpolant)
+            target = x1 - z                                  # dI_t/dt
+            pred = model(xt, t, y)
+            loss = (pred - target).pow(2).mean()
+
+        opt.zero_grad(set_to_none=True)
+        if use_scaler:
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+        else:
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+        if step % 100 == 0 or step == 1:
+            print(f"    [pretrain] step {step:6d}/{steps}  loss={loss.item():.5f}")
+        if tracker is not None and global_step is not None:
+            tracker.log({"bootstrap/loss": loss.item()}, step=global_step[0])
+        if global_step is not None:
+            global_step[0] += 1
+
+    # Sample pi(0) from the pre-trained model, conditioned on the real observations.
+    x_pool, _ = update_prior(model, y_obs, n_points, sample_steps, batch, device)
+    return x_pool
+
+
 # ── EM driver ─────────────────────────────────────────────────────────────────
 
 
@@ -311,8 +403,9 @@ def scsi_train(
     sample_steps: int = 50,
     coupled_fraction: float = 0.0,
     bootstrap: str = "backproject",
-    perturb_std: float = 0.3,
+    perturb_std: float = 0.0,
     perturb_shape: str = "torus",
+    pretrain_steps: int = 2000,
     n_eval: int = 4,
     use_amp: bool = True,
     seed: int = 0,
@@ -339,11 +432,22 @@ def scsi_train(
     gt, y_obs = gt.cpu(), y_obs.cpu()
     print(f"[scsi] y_obs {tuple(y_obs.shape)}  range=[{y_obs.min():.2f}, {y_obs.max():.2f}]")
 
-    # Bootstrap pi(0).
+    out_dir = Path(eval_dir)
+    ckpt_dir = Path("toy3d_pc_scsi_checkpoints")
+    ckpt_dir.mkdir(exist_ok=True)
+    global_step = [0]  # shared wandb step; the "perturbed" bootstrap advances it too
+
+    # Bootstrap pi(0). The "perturbed" bootstrap pre-trains `model` (fields below);
+    # the others ignore the model / pre-training fields and just build a pool.
     ctx = BootstrapContext(
         y_obs=y_obs, n_objects=n_objects, n_points=cfg.n_points,
         extent=extent, seed=seed,
-        perturb_std=perturb_std, perturb_shape=perturb_shape,
+        perturb_shape=perturb_shape, perturb_std=perturb_std,
+        model=model, device=device,
+        radius=radius, noise_std=noise_std, image_size=cfg.image_size,
+        pretrain_steps=pretrain_steps, batch=batch, lr=lr,
+        sample_steps=sample_steps, use_amp=use_amp,
+        tracker=tracker, global_step=global_step,
     )
     x_pool = make_bootstrap(bootstrap, ctx)
     z_pool = None
@@ -351,10 +455,6 @@ def scsi_train(
 
     n_eval = min(n_eval, n_objects)
     gt_eval, y_eval = gt[:n_eval], y_obs[:n_eval]
-    out_dir = Path(eval_dir)
-    ckpt_dir = Path("toy3d_pc_scsi_checkpoints")
-    ckpt_dir.mkdir(exist_ok=True)
-    global_step = [0]
 
     for k in range(em_steps):
         print("=" * 60)
