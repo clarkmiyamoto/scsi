@@ -499,6 +499,15 @@ wheels = [
 ]
 
 [[package]]
+name = "dnnlib-util"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/4a/340ab893917f4a7de32c132830df8740cc8ca9377e99b4a6360fc90dd4d3/dnnlib-util-0.3.1.tar.gz", hash = "sha256:3d15f06ca00f43d025787a3eb005ce62b236e7e1d4dec9d9a248e2e2bc8625bb", size = 8730, upload-time = "2021-08-06T15:15:17.713Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/d0/3e8475aa7056ff7589aa09d310ca3ef6e5c9d99d296c0c703df158308e7f/dnnlib_util-0.3.1-py3-none-any.whl", hash = "sha256:e3861492335083ca8b6d401ffa7f7a20f3d4d449e48efb458d6c459ecae3e802", size = 8960, upload-time = "2021-08-06T15:15:19.228Z" },
+]
+
+[[package]]
 name = "executing"
 version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2156,6 +2165,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "diffusers" },
+    { name = "dnnlib-util" },
     { name = "matplotlib" },
     { name = "pandas" },
     { name = "scikit-image" },
@@ -2183,6 +2193,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.13.0" },
     { name = "diffusers", specifier = ">=0.37.1" },
+    { name = "dnnlib-util", specifier = ">=0.3.1" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "pandas", specifier = ">=3.0.3" },
     { name = "scikit-image", specifier = ">=0.26.0" },
