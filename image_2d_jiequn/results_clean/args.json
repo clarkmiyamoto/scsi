@@ -1,0 +1,19 @@
+{
+  "K": 16,
+  "tilt_span_deg": 60.0,
+  "epsilon": 0.0,
+  "train_steps": 20000,
+  "warmup_steps": 4000,
+  "transport_steps": 500,
+  "batch_size": 64,
+  "lr": 0.0002,
+  "ode_steps": 80,
+  "alpha": 1.0,
+  "ema_decay": 0.999,
+  "model_channels": 32,
+  "data_root": "./data",
+  "results_folder": "./results_clean",
+  "max_images": -1,
+  "num_workers": 0,
+  "seed": 42
+}
