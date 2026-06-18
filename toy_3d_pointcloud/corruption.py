@@ -26,6 +26,17 @@ def random_so3(batch: int, device: torch.device | str = "cpu") -> torch.Tensor:
     mats = Rotation.random(batch).as_matrix().astype(np.float32)  # (batch, 3, 3)
     return torch.from_numpy(mats).to(device)
 
+def random_so2(batch: int, device: torch.device | str = "cpu") -> torch.Tensor:
+    """Haar-uniform SO(2) rotation matrices (around Z-axis), shape (batch, 3, 3)."""
+    # Sample uniform angles between 0 and 2*pi. Shape (batch, 1) so SciPy reads each
+    # row as one single-axis ('z') rotation rather than one rotation of `batch` angles.
+    angles = np.random.uniform(0, 2 * np.pi, (batch, 1))
+
+    # Generate rotations around the Z axis
+    mats = Rotation.from_euler("z", angles).as_matrix().astype(np.float32)  # (batch, 3, 3)
+
+    return torch.from_numpy(mats).to(device)
+
 
 def forward_channel(
     points: torch.Tensor,           # (B, N, 3)
@@ -34,6 +45,7 @@ def forward_channel(
     image_size: int = 32,
     extent: float = 2.0,
     R: torch.Tensor | None = None,  # (B, 3, 3) fixed pose, or None for fresh random
+    so2: bool = False,
 ) -> torch.Tensor:
     """Render point clouds to noisy 2D projections. Returns (B, 1, P, P).
 
@@ -49,7 +61,10 @@ def forward_channel(
     device = points.device
 
     if R is None:
-        R = random_so3(B, device)
+        if so2:
+            R = random_so2(B, device)
+        else:
+            R = random_so3(B, device)
     x_rot = torch.matmul(points, R.transpose(-1, -2))   # (B, N, 3)
     px = x_rot[..., 0]                                   # (B, N) -> image columns (x)
     py = x_rot[..., 1]                                   # (B, N) -> image rows (y)

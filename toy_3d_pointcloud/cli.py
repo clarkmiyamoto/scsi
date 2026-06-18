@@ -111,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--radius", type=float, default=0.08, help="ball radius for the channel F")
     pe.add_argument("--noise-std", type=float, default=0.1, help="AWGN std on projections")
     pe.add_argument("--extent", type=float, default=2.0, help="world half-extent mapped to the image")
+    pe.add_argument(
+        "--so2", action="store_true",
+        help="restrict the forward-channel pose to SO(2) (in-plane rotation about Z) "
+             "instead of full SO(3)",
+    )
     pe.add_argument("--sample-steps", type=int, default=50, help="M-step Euler ODE steps")
     pe.add_argument("--coupled-fraction", type=float, default=0.0,
                     help="fraction of E-step batch using paired z from the M-step")
@@ -252,7 +257,7 @@ def main(argv: list[str] | None = None) -> None:
                     eval_every=args.eval_every,
                     use_amp=not args.no_amp, seed=args.seed, shapes=args.shape,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                    viz_ball_radius=args.viz_ball_radius,
+                    viz_ball_radius=args.viz_ball_radius, so2=args.so2,
                 )
             else:
                 scsi_train(
@@ -267,7 +272,7 @@ def main(argv: list[str] | None = None) -> None:
                     n_eval=args.n_eval,
                     use_amp=not args.no_amp, seed=args.seed,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                    viz_ball_radius=args.viz_ball_radius,
+                    viz_ball_radius=args.viz_ball_radius, so2=args.so2,
                 )
 
     elif args.cmd == "balls":

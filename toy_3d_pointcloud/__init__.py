@@ -4,7 +4,7 @@ Also includes lifted SCSI (``scsi`` subcommand): recover a generative prior over
 clean 3D point clouds from only their corrupted 2D projections, via EM.
 """
 from .balls import point_cloud_to_balls, save_balls_obj
-from .corruption import backproject_bootstrap, forward_channel, random_so3
+from .corruption import backproject_bootstrap, forward_channel, random_so2, random_so3
 from .data import (
     available_shapes,
     make_mixture_sampler,
@@ -50,6 +50,7 @@ __all__ = [
     "save_balls_obj",
     # corruption channel F
     "forward_channel",
+    "random_so2",
     "random_so3",
     "backproject_bootstrap",
     # shapes / dataset
