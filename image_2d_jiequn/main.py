@@ -39,8 +39,7 @@ def make_orbit_random_fn():
 def main():
     cfg = parse_args()
     torch.manual_seed(cfg.seed)
-    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    print(f"Using device: {device}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     base = load_mnist_pm1(cfg.data_root)
     if cfg.max_images > 0:
@@ -49,7 +48,8 @@ def main():
     fwd = radon_tilt_series(cfg.epsilon, cfg.K, cfg.tilt_span_deg)
     dataset = CorruptedTiltDataset(base, fwd, base_seed=cfg.seed)
 
-    model = build_model(D=32, nc=1, K=cfg.K, model_channels=cfg.model_channels)
+    model = build_model(D=32, nc=1, K=cfg.K, model_channels=cfg.model_channels,
+                        network=cfg.network)
     interpolant = SCSInterpolant(fwd, n_steps=cfg.ode_steps, alpha=cfg.alpha)
 
     trainer = Trainer(

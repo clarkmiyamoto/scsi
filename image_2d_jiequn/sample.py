@@ -46,6 +46,7 @@ def main():
     p.add_argument("--tilt_span_deg", type=float, default=60.0)
     p.add_argument("--epsilon", type=float, default=0.0)
     p.add_argument("--ode_steps", type=int, default=80)
+    p.add_argument("--network", type=str, default="unet", choices=["unet", "dit"])
     p.add_argument("--model_channels", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=str, default="./results_clean/samples.png")
@@ -66,7 +67,8 @@ def main():
 
     fbp_img = warmup_target(cond, args.K, args.tilt_span_deg)           # [n,1,32,32]
 
-    model = build_model(D=32, nc=1, K=args.K, model_channels=args.model_channels).to(device)
+    model = build_model(D=32, nc=1, K=args.K, model_channels=args.model_channels,
+                        network=args.network).to(device)
     ckpt = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(ckpt["ema"])                                 # EMA weights
     model.eval()

@@ -20,7 +20,8 @@ class Config:
     ode_steps: int = 80             # Euler steps for transport
     alpha: float = 1.0              # prob of using freshly re-corrupted data
     ema_decay: float = 0.999
-    model_channels: int = 32
+    network: str = "unet"           # 'unet' or 'dit' (dit = best FID, needs diffusers)
+    model_channels: int = 32        # UNet base channels (ignored by dit)
 
     # data / io
     data_root: str = "./data"
@@ -44,6 +45,7 @@ def parse_args(argv=None) -> Config:
     p.add_argument("--ode_steps", type=int, default=d.ode_steps)
     p.add_argument("--alpha", type=float, default=d.alpha)
     p.add_argument("--ema_decay", type=float, default=d.ema_decay)
+    p.add_argument("--network", type=str, default=d.network, choices=["unet", "dit"])
     p.add_argument("--model_channels", type=int, default=d.model_channels)
     p.add_argument("--data_root", type=str, default=d.data_root)
     p.add_argument("--results_folder", type=str, default=d.results_folder)
