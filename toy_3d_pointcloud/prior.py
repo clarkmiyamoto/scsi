@@ -59,7 +59,8 @@ class BootstrapContext:
     radius: float = 0.08         # ball radius for the channel F
     noise_std: float = 0.1       # AWGN std on the projections F(x)
     image_size: int = 32         # projection size P
-    so2: bool = False            # restrict F's pose to SO(2) (in-plane about Z)
+    so2: bool = False            # restrict F's pose to SO(2) (single-axis rotation)
+    so2_axis: str = "z"          # axis for the SO(2) pose ("x"/"y"/"z")
     pretrain_steps: int = 2000   # flow-matching steps before EM
     batch: int = 64
     lr: float = 2e-4
@@ -130,7 +131,8 @@ def _perturbed(ctx: BootstrapContext) -> torch.Tensor:
         sample_steps=ctx.sample_steps, perturb_std=ctx.perturb_std,
         shapes=ctx.shapes,
         device=ctx.device, use_amp=ctx.use_amp, seed=ctx.seed,
-        tracker=ctx.tracker, global_step=ctx.global_step, so2=ctx.so2,
+        tracker=ctx.tracker, global_step=ctx.global_step,
+        so2=ctx.so2, so2_axis=ctx.so2_axis,
     )
 
 

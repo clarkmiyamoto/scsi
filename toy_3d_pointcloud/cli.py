@@ -113,8 +113,13 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--extent", type=float, default=2.0, help="world half-extent mapped to the image")
     pe.add_argument(
         "--so2", action="store_true",
-        help="restrict the forward-channel pose to SO(2) (in-plane rotation about Z) "
+        help="restrict the forward-channel pose to SO(2) (single-axis rotation) "
              "instead of full SO(3)",
+    )
+    pe.add_argument(
+        "--so2-axis", choices=["x", "y", "z"], default="z",
+        help="[--so2] rotation axis: 'z' spins the projection in-plane; 'x'/'y' tilt "
+             "the object out of plane",
     )
     pe.add_argument("--sample-steps", type=int, default=50, help="M-step Euler ODE steps")
     pe.add_argument("--coupled-fraction", type=float, default=0.0,
@@ -258,6 +263,7 @@ def main(argv: list[str] | None = None) -> None:
                     use_amp=not args.no_amp, seed=args.seed, shapes=args.shape,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
                     viz_ball_radius=args.viz_ball_radius, so2=args.so2,
+                    so2_axis=args.so2_axis,
                 )
             else:
                 scsi_train(
@@ -273,6 +279,7 @@ def main(argv: list[str] | None = None) -> None:
                     use_amp=not args.no_amp, seed=args.seed,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
                     viz_ball_radius=args.viz_ball_radius, so2=args.so2,
+                    so2_axis=args.so2_axis,
                 )
 
     elif args.cmd == "balls":
