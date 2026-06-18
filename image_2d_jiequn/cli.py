@@ -29,6 +29,8 @@ class Config:
     max_images: int = -1            # subset MNIST for fast smoke tests (-1 = all)
     num_workers: int = 0
     seed: int = 42
+    wandb: bool = False
+    debug: bool = False
 
 
 def parse_args(argv=None) -> Config:
@@ -52,4 +54,15 @@ def parse_args(argv=None) -> Config:
     p.add_argument("--max_images", type=int, default=d.max_images)
     p.add_argument("--num_workers", type=int, default=d.num_workers)
     p.add_argument("--seed", type=int, default=d.seed)
-    return Config(**vars(p.parse_args(argv)))
+    p.add_argument("--wandb", action="store_true", default=False)
+    p.add_argument("--debug", action="store_true", default=False)
+    cfg = Config(**vars(p.parse_args(argv)))
+    if cfg.debug:
+        cfg.max_images = 64
+        cfg.batch_size = 16
+        cfg.train_steps = 25
+        cfg.warmup_steps = 10
+        cfg.transport_steps = 5
+        cfg.ode_steps = 4
+        cfg.num_workers = 0
+    return cfg

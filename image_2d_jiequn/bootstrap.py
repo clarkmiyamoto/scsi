@@ -54,7 +54,7 @@ class Trainer:
                  ema_decay: float = 0.999, results_folder: str = "./results_clean",
                  warmup_target_fn=None, warmup_orbit_random_fn=None,
                  save_every: int = 500, log_every: int = 50,
-                 num_workers: int = 0, device=None):
+                 num_workers: int = 0, device=None, logger=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.interpolant = interpolant
@@ -71,6 +71,7 @@ class Trainer:
         self.ema = EMA(self.model, beta=ema_decay)
         self.dl = _infinite(DataLoader(dataset, batch_size=batch_size, shuffle=True,
                                        num_workers=num_workers, drop_last=True))
+        self.logger = logger
         self.step = 0
 
     def train(self):
@@ -81,6 +82,11 @@ class Trainer:
         print(f"Training {self.train_steps} steps on {device} "
               f"(warmup {self.warmup_steps}, refresh every {self.transport_steps})",
               flush=True)
+
+        _clean_viz, obs_viz, cond_viz = next(self.dl)
+        obs_viz = obs_viz.to(device)
+        cond_viz = cond_viz.to(device)
+        _clean_viz = _clean_viz.to(device)
 
         while self.step < self.train_steps:
             self.model.train()
@@ -101,19 +107,24 @@ class Trainer:
                     for p in transport_map.parameters():
                         p.requires_grad_(False)
                     print(f"[step {self.step}] refreshed frozen transport model", flush=True)
+                    with torch.no_grad():
+                        fbp_viz = self.warmup_target_fn(cond_viz) if self.warmup_target_fn else obs_viz
+                        recon_viz = self.interpolant.transport(self.ema.ema_model, obs_viz, cond_viz)
+                    self.logger.log_recon(self.step, _clean_viz, fbp_viz, recon_viz)
                 loss = self.interpolant.loss_fn(self.model, obs, cond, b_fixed=transport_map)
 
             self.opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.opt.step()
             self.ema.update(self.model)
 
             self.step += 1
             lval = loss.item()
             losses.append(lval)
+            phase = "warmup" if self.step <= self.warmup_steps else "bootstrap"
+            self.logger.log_step(self.step, lval, grad_norm.item(), phase)
             if self.step % self.log_every == 0:
-                phase = "warmup" if self.step <= self.warmup_steps else "bootstrap"
                 print(f"step {self.step}/{self.train_steps} [{phase}]  loss {lval:.4f}", flush=True)
             if lval < best:
                 best = lval

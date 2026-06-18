@@ -18,6 +18,7 @@ from dataclasses import asdict
 import torch
 
 from cli import parse_args
+from wandb_log import WandbLogger
 from data import load_mnist_pm1, CorruptedTiltDataset
 from forward import radon_tilt_series, rotate_image
 from backwards import warmup_target
@@ -38,6 +39,7 @@ def make_orbit_random_fn():
 
 def main():
     cfg = parse_args()
+    logger = WandbLogger(enabled=cfg.wandb, config=asdict(cfg))
     torch.manual_seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -59,13 +61,14 @@ def main():
         ema_decay=cfg.ema_decay, results_folder=cfg.results_folder,
         warmup_target_fn=lambda c: warmup_target(c, cfg.K, cfg.tilt_span_deg),
         warmup_orbit_random_fn=make_orbit_random_fn(),
-        num_workers=cfg.num_workers, device=device,
+        num_workers=cfg.num_workers, device=device, logger=logger,
     )
 
     with open(os.path.join(cfg.results_folder, "args.json"), "w") as f:
         json.dump(asdict(cfg), f, indent=2)
 
     trainer.train()
+    logger.finish()
 
 
 if __name__ == "__main__":
