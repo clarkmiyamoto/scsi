@@ -112,14 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--noise-std", type=float, default=0.1, help="AWGN std on projections")
     pe.add_argument("--extent", type=float, default=2.0, help="world half-extent mapped to the image")
     pe.add_argument(
-        "--so2", action="store_true",
-        help="restrict the forward-channel pose to SO(2) (single-axis rotation) "
-             "instead of full SO(3)",
+        "--channel", choices=["so3", "so2", "awgn_proj"], default="so3",
+        help="forward corruption channel: 'so3' random 3D pose; 'so2' single-axis pose "
+             "(see --so2-axis); 'awgn_proj' no rotation, with AWGN added to the 3D point "
+             "coordinates (iid per coordinate per particle) before projection",
     )
     pe.add_argument(
         "--so2-axis", choices=["x", "y", "z"], default="z",
-        help="[--so2] rotation axis: 'z' spins the projection in-plane; 'x'/'y' tilt "
-             "the object out of plane",
+        help="[--channel so2] rotation axis: 'z' spins the projection in-plane; 'x'/'y' "
+             "tilt the object out of plane",
     )
     pe.add_argument("--sample-steps", type=int, default=50, help="M-step Euler ODE steps")
     pe.add_argument("--coupled-fraction", type=float, default=0.0,
@@ -262,7 +263,7 @@ def main(argv: list[str] | None = None) -> None:
                     eval_every=args.eval_every,
                     use_amp=not args.no_amp, seed=args.seed, shapes=args.shape,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                    viz_ball_radius=args.viz_ball_radius, so2=args.so2,
+                    viz_ball_radius=args.viz_ball_radius, channel=args.channel,
                     so2_axis=args.so2_axis,
                 )
             else:
@@ -278,7 +279,7 @@ def main(argv: list[str] | None = None) -> None:
                     n_eval=args.n_eval,
                     use_amp=not args.no_amp, seed=args.seed,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                    viz_ball_radius=args.viz_ball_radius, so2=args.so2,
+                    viz_ball_radius=args.viz_ball_radius, channel=args.channel,
                     so2_axis=args.so2_axis,
                 )
 

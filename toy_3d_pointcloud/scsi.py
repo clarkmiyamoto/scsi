@@ -88,7 +88,7 @@ def train_estep(
     use_amp: bool,
     global_step: list,
     tracker: Tracker | None = None,
-    so2: bool = False,
+    channel: str = "so3",
     so2_axis: str = "z",
 ) -> None:
     has_z = z_pool is not None and coupled_fraction > 0.0
@@ -131,7 +131,7 @@ def train_estep(
             with torch.no_grad():
                 y_hat = forward_channel(
                     x1, radius=radius, noise_std=noise_std,
-                    image_size=image_size, extent=extent, so2=so2, so2_axis=so2_axis,
+                    image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis,
                 )
 
             with autocast(device, use_amp):
@@ -232,7 +232,7 @@ def log_em_step(
     viz_ball_radius: float,
     tag: str = "EM step",
     shapes: list[str] | None = None,
-    so2: bool = False,
+    channel: str = "so3",
     so2_axis: str = "z",
 ) -> None:
     """4-row panel: GT cloud | y_obs | pi(k) sample | F(pi(k)) consistency check."""
@@ -244,7 +244,7 @@ def log_em_step(
     with torch.no_grad():
         y_pi = forward_channel(
             pi_eval, radius=radius, noise_std=noise_std,
-            image_size=image_size, extent=extent, so2=so2, so2_axis=so2_axis,
+            image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis,
         )
 
     gt_np = gt_eval.cpu().numpy()
@@ -325,15 +325,16 @@ def pretrain_rotation_prior(
     shapes: list[str] | None = None,
     tracker: Tracker | None = None,
     global_step: list | None = None,
-    so2: bool = False,
+    channel: str = "so3",
     so2_axis: str = "z",
 ) -> torch.Tensor:
     """Warmstart pi(0): pre-train ``model`` to generate random rotations of the
     base object conditioned on F(x), then sample pi(0) on the real observations.
 
     Each step draws fresh canonical clouds from ``shape_fn``, rotates each by an
-    independent random rotation (full SO(3), or SO(2) about Z when ``so2`` is set, to
-    match the channel), renders ``y = F(rotated)`` with F's own fresh random pose (the
+    independent random rotation matching the ``channel`` (full SO(3); SO(2) about
+    ``so2_axis``; or no rotation for ``"awgn_proj"``), renders ``y = F(rotated)`` with
+    F's own fresh random pose / coordinate noise (the
     marginalize-over-pose channel), and takes a flow-matching step on the pair
     ``(rotated, y)``. Rotating the *target* is what lets the recovered prior cover all
     orientations instead of collapsing to the canonical frame. The trained weights are
@@ -353,14 +354,20 @@ def pretrain_rotation_prior(
     model.train()
     for step in range(1, steps + 1):
         x1 = shape_fn(batch, n_points, device=device)        # canonical clouds
-        R = random_so2(batch, device, axis=so2_axis) if so2 else random_so3(batch, device)
-        x1 = torch.matmul(x1, R.transpose(-1, -2))           # random rotation per cloud
+        if channel == "so2":
+            R = random_so2(batch, device, axis=so2_axis)
+        elif channel == "so3":
+            R = random_so3(batch, device)
+        else:                                                # awgn_proj: no rotation
+            R = None
+        if R is not None:
+            x1 = torch.matmul(x1, R.transpose(-1, -2))       # random rotation per cloud
         if perturb_std > 0:
             x1 = x1 + perturb_std * torch.randn_like(x1)
         with torch.no_grad():
             y = forward_channel(
                 x1, radius=radius, noise_std=noise_std,
-                image_size=image_size, extent=extent, so2=so2, so2_axis=so2_axis,
+                image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis,
             )                                                # fresh random pose in F
         z = torch.randn_like(x1)
 
@@ -423,7 +430,7 @@ def scsi_train(
     out: str = "scsi_checkpoint.pt",
     eval_dir: str = "toy3d_pc_eval",
     viz_ball_radius: float = 0.05,
-    so2: bool = False,
+    channel: str = "so3",
     so2_axis: str = "z",
 ) -> ConditionalPointCloudVelocity:
     torch.manual_seed(seed)
@@ -441,7 +448,7 @@ def scsi_train(
     with torch.no_grad():
         y_obs = forward_channel(
             gt, radius=radius, noise_std=noise_std,
-            image_size=cfg.image_size, extent=extent, so2=so2, so2_axis=so2_axis,
+            image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis,
         )                                                            # frozen observations
     gt, y_obs = gt.cpu(), y_obs.cpu()
     print(f"[scsi] y_obs {tuple(y_obs.shape)}  range=[{y_obs.min():.2f}, {y_obs.max():.2f}]")
@@ -462,7 +469,7 @@ def scsi_train(
         pretrain_steps=pretrain_steps, batch=batch, lr=lr,
         sample_steps=sample_steps, use_amp=use_amp,
         tracker=tracker, global_step=global_step,
-        so2=so2, so2_axis=so2_axis,
+        channel=channel, so2_axis=so2_axis,
     )
     x_pool = make_bootstrap(bootstrap, ctx)
     z_pool = None
@@ -482,7 +489,7 @@ def scsi_train(
             image_size=cfg.image_size, extent=extent,
             epochs=epochs_per_em, batch=batch, lr=lr,
             device=device, use_amp=use_amp,
-            global_step=global_step, tracker=tracker, so2=so2, so2_axis=so2_axis,
+            global_step=global_step, tracker=tracker, channel=channel, so2_axis=so2_axis,
         )
         save_checkpoint(str(ckpt_dir / f"model_em{k:04d}.pt"), model, cfg)
 
@@ -498,7 +505,7 @@ def scsi_train(
             image_size=cfg.image_size, extent=extent,
             em_step=k, tracker=tracker, out_dir=out_dir,
             global_step=global_step, viz_ball_radius=viz_ball_radius,
-            shapes=shapes, so2=so2, so2_axis=so2_axis,
+            shapes=shapes, channel=channel, so2_axis=so2_axis,
         )
 
     save_checkpoint(out, model, cfg)
@@ -528,7 +535,7 @@ def train_supervised(
     out: str = "scsi_checkpoint.pt",
     eval_dir: str = "toy3d_pc_eval",
     viz_ball_radius: float = 0.05,
-    so2: bool = False,
+    channel: str = "so3",
     so2_axis: str = "z",
 ) -> ConditionalPointCloudVelocity:
     """Supervised oracle: train b_t directly on the coupling (x, F(x)) with unlimited
@@ -551,7 +558,7 @@ def train_supervised(
     with torch.no_grad():
         y_eval = forward_channel(
             gt_eval, radius=radius, noise_std=noise_std,
-            image_size=cfg.image_size, extent=extent, so2=so2, so2_axis=so2_axis,
+            image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis,
         )
     gt_eval, y_eval = gt_eval.cpu(), y_eval.cpu()
 
@@ -572,7 +579,7 @@ def train_supervised(
         with torch.no_grad():
             y = forward_channel(
                 x1, radius=radius, noise_std=noise_std,
-                image_size=cfg.image_size, extent=extent, so2=so2, so2_axis=so2_axis,
+                image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis,
             )                                                    # fresh random pose
         z = torch.randn_like(x1)
 
@@ -613,7 +620,7 @@ def train_supervised(
                 image_size=cfg.image_size, extent=extent,
                 em_step=step, tracker=tracker, out_dir=out_dir,
                 global_step=global_step, viz_ball_radius=viz_ball_radius,
-                tag="supervised", shapes=shapes, so2=so2, so2_axis=so2_axis,
+                tag="supervised", shapes=shapes, channel=channel, so2_axis=so2_axis,
             )
             save_checkpoint(str(ckpt_dir / f"model_sup{step:06d}.pt"), model, cfg)
             model.train()
