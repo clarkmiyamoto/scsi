@@ -166,6 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--eval-dir", default="toy3d_pc_eval", help="where eval PNGs are written")
     pe.add_argument("--viz-ball-radius", type=float, default=0.05,
                     help="ball radius for logged W&B meshes (0=off)")
+    pe.add_argument(
+        "--ema-decay", type=float, default=0.999,
+        help="EMA decay for the M-step sampler (per optimizer step); 0.0 disables EMA",
+    )
     pe.add_argument("--debug", action="store_true", help="tiny smoke-test config")
     _add_wandb_args(pe)
     return p
@@ -302,6 +306,7 @@ def main(argv: list[str] | None = None) -> None:
                     n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
                     tomo_vol=args.tomo_vol, tomo_quantile=args.tomo_quantile,
                     dataset=args.dataset, dataset_eps=args.dataset_eps,
+                    ema_decay=args.ema_decay,
                 )
 
     elif args.cmd == "balls":

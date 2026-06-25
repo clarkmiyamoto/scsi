@@ -17,6 +17,7 @@ y_obs = F(x_gt) and for visualization; the model never trains on them.
 """
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 from dataclasses import asdict, dataclass
@@ -95,6 +96,8 @@ def train_estep(
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
+    model_ema: nn.Module | None = None,
+    ema_decay: float = 0.0,
 ) -> None:
     has_z = z_pool is not None and coupled_fraction > 0.0
     dataset = TensorDataset(x_pool, z_pool) if has_z else TensorDataset(x_pool)
@@ -160,6 +163,11 @@ def train_estep(
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 opt.step()
+
+            if model_ema is not None and ema_decay > 0:
+                with torch.no_grad():
+                    for p, p_ema in zip(model.parameters(), model_ema.parameters()):
+                        p_ema.lerp_(p, 1.0 - ema_decay)
 
             running += loss.item()
             n_batches += 1
@@ -406,6 +414,7 @@ def scsi_train(
     tomo_quantile: float = 0.15,
     dataset: str = "iid",
     dataset_eps: float = 0.0,
+    ema_decay: float = 0.999,
 ) -> ConditionalPointCloudVelocity:
     torch.manual_seed(seed)
     configure_backends(device)
@@ -416,6 +425,11 @@ def scsi_train(
     model = build_conditional_model(cfg, device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[scsi] parameters: {n_params:,}")
+
+    model_ema = copy.deepcopy(model) if ema_decay > 0 else None
+    if model_ema is not None:
+        model_ema.eval()
+        print(f"[scsi] EMA sampler enabled  decay={ema_decay}")
 
     # Phase 1: ground-truth clouds — used ONLY to make y_obs and for visualization.
     if dataset == "template":
@@ -474,8 +488,11 @@ def scsi_train(
             global_step=global_step, tracker=tracker,
             coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
+            model_ema=model_ema, ema_decay=ema_decay,
         )
         save_checkpoint(str(ckpt_dir / "model_pretrain.pt"), model, cfg)
+        if model_ema is not None:
+            save_checkpoint(str(ckpt_dir / "model_pretrain_ema.pt"), model_ema, cfg)
 
     # Phase 3: SCSI EM loop.
     for k in range(em_steps):
@@ -492,12 +509,16 @@ def scsi_train(
             global_step=global_step, tracker=tracker,
             coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
+            model_ema=model_ema, ema_decay=ema_decay,
         )
         save_checkpoint(str(ckpt_dir / f"model_em{k:04d}.pt"), model, cfg)
+        if model_ema is not None:
+            save_checkpoint(str(ckpt_dir / f"model_em{k:04d}_ema.pt"), model_ema, cfg)
 
         print(f"  M-step: sampling pi({k + 1}) ...")
+        sampler = model_ema if model_ema is not None else model
         x_pool, z_pool = update_prior(
-            model, y_obs, cfg.n_points, sample_steps, batch * 3, device, shapes=shapes
+            sampler, y_obs, cfg.n_points, sample_steps, batch * 3, device, shapes=shapes
         )
         synchronize(device)
 
@@ -512,8 +533,12 @@ def scsi_train(
         )
 
     save_checkpoint(out, model, cfg)
+    if model_ema is not None:
+        ema_out = out.replace(".pt", "_ema.pt") if out.endswith(".pt") else out + "_ema"
+        save_checkpoint(ema_out, model_ema, cfg)
+        print(f"[scsi] saved EMA checkpoint -> {ema_out}")
     print(f"[scsi] saved final checkpoint -> {out}")
-    return model
+    return model_ema if model_ema is not None else model
 
 
 # ── Supervised baseline (debug oracle) ────────────────────────────────────────
