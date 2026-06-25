@@ -138,6 +138,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--tilt-axis", choices=["x", "y"], default="y",
         help="[--channel cryoet] tilt axis (out-of-plane; 'z' would be in-plane/degenerate)",
     )
+    pe.add_argument(
+        "--tomo-vol", type=int, default=48,
+        help="[--bootstrap tomo] back-projection grid resolution (vol^3)",
+    )
+    pe.add_argument(
+        "--tomo-quantile", type=float, default=0.15,
+        help="[--bootstrap tomo] space-carving quantile over tilts "
+             "(0.0 = strict intersection/min, 0.5 = median)",
+    )
     pe.add_argument("--sample-steps", type=int, default=50, help="M-step Euler ODE steps")
     pe.add_argument("--coupled-fraction", type=float, default=0.0,
                     help="fraction of E-step batch using paired z from the M-step")
@@ -312,6 +321,7 @@ def main(argv: list[str] | None = None) -> None:
                     viz_ball_radius=args.viz_ball_radius, channel=args.channel,
                     so2_axis=args.so2_axis, coord_noise_std=args.coord_noise_std,
                     n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
+                    tomo_vol=args.tomo_vol, tomo_quantile=args.tomo_quantile,
                     dataset=args.dataset, dataset_eps=args.dataset_eps,
                 )
 

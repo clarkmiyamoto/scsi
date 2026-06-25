@@ -317,6 +317,69 @@ def log_em_step(
         tracker.log({"eval/surface_residual": resid}, step=global_step[0])
 
 
+def log_bootstrap(
+    pi0: torch.Tensor,            # (n, N, 3) bootstrap reconstruction pi(0)
+    bootstrap: str,
+    tracker: Tracker | None,
+    out_dir: Path,
+    global_step: list,
+    viz_ball_radius: float,
+    gt: torch.Tensor | None = None,   # (n, N, 3) reference clouds (optional)
+    shapes: list[str] | None = None,
+) -> None:
+    """Visualize the bootstrap pi(0) reconstruction and log it to disk + W&B.
+
+    Renders the initial point cloud (e.g. the tomographic back-projection) as a 3D
+    scatter PNG, an interactive ``wandb.Object3D`` cloud, and a union-of-balls mesh,
+    before any EM refinement. With ``gt`` given, the clean reference is shown beneath.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n = pi0.size(0)
+    pi_np = pi0.cpu().numpy()
+    gt_np = gt.cpu().numpy() if gt is not None else None
+    lim = 1.8
+    rows = 2 if gt_np is not None else 1
+
+    fig = plt.figure(figsize=(2.8 * n, 2.8 * rows))
+    for j in range(n):
+        ax = fig.add_subplot(rows, n, j + 1, projection="3d")
+        ax.scatter(pi_np[j, :, 0], pi_np[j, :, 1], pi_np[j, :, 2], s=2, alpha=0.6, color="C1")
+        _set3d(ax, lim)
+        if j == 0:
+            ax.set_title(f"pi(0)  [{bootstrap}]", fontsize=9)
+        if gt_np is not None:
+            ax2 = fig.add_subplot(rows, n, n + j + 1, projection="3d")
+            ax2.scatter(gt_np[j, :, 0], gt_np[j, :, 1], gt_np[j, :, 2], s=2, alpha=0.6)
+            _set3d(ax2, lim)
+            if j == 0:
+                ax2.set_title("GT cloud", fontsize=9)
+
+    fig.suptitle(f"bootstrap pi(0): {bootstrap}", fontsize=12)
+    fig.tight_layout()
+    out_dir.mkdir(exist_ok=True)
+    path = out_dir / f"bootstrap_{bootstrap}_pi0.png"
+    fig.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    resid = mixture_surface_residual(pi0, shapes or ["torus"]).item()
+    print(f"  [bootstrap] wrote {path}  pi(0) surface_residual={resid:.4f}")
+
+    if tracker is not None and tracker.enabled:
+        tracker.log_image("bootstrap/pi0_panel", str(path), step=global_step[0])
+        tracker.log_clouds("bootstrap/pi0", pi0, step=global_step[0])
+        if viz_ball_radius > 0:
+            with tempfile.TemporaryDirectory(prefix="pcscsi_balls_") as tmp:
+                paths = []
+                for j in range(n):
+                    p = os.path.join(tmp, f"pi0_{j}.obj")
+                    save_balls_obj(pi_np[j], p, viz_ball_radius, 1)
+                    paths.append(p)
+                tracker.log_meshes("bootstrap/pi0_balls", paths, step=global_step[0])
+        tracker.log({"bootstrap/surface_residual": resid}, step=global_step[0])
+
+
 # ── Bootstrap: pre-trained rotation prior ──────────────────────────────────────
 
 
@@ -451,6 +514,8 @@ def scsi_train(
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
+    tomo_vol: int = 48,
+    tomo_quantile: float = 0.15,
     dataset: str = "iid",
     dataset_eps: float = 0.0,
 ) -> ConditionalPointCloudVelocity:
@@ -501,6 +566,7 @@ def scsi_train(
         tracker=tracker, global_step=global_step,
         channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
         n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
+        tomo_vol=tomo_vol, tomo_quantile=tomo_quantile,
     )
     x_pool = make_bootstrap(bootstrap, ctx)
     z_pool = None
@@ -508,6 +574,12 @@ def scsi_train(
 
     n_eval = min(n_eval, n_objects)
     gt_eval, y_eval = gt[:n_eval], y_obs[:n_eval]
+
+    # Visualize the bootstrap reconstruction pi(0) before any EM refinement.
+    log_bootstrap(
+        x_pool[:n_eval], bootstrap, tracker, out_dir, global_step,
+        viz_ball_radius, gt=gt_eval, shapes=shapes,
+    )
 
     for k in range(em_steps):
         print("=" * 60)

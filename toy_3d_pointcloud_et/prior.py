@@ -65,6 +65,8 @@ class BootstrapContext:
     n_tilts: int = 11            # [cryoet] number of tilt projections K
     tilt_step: float = 12.0      # [cryoet] degrees between consecutive tilts
     tilt_axis: str = "y"         # [cryoet] tilt axis ("x"/"y")
+    tomo_vol: int = 48           # [bootstrap=tomo] reconstruction grid resolution
+    tomo_quantile: float = 0.15  # [bootstrap=tomo] space-carving quantile (0 = strict min)
     pretrain_steps: int = 2000   # flow-matching steps before EM
     batch: int = 64
     lr: float = 2e-4
@@ -155,7 +157,8 @@ def _tomo(ctx: BootstrapContext) -> torch.Tensor:
 
     return backproject_tomo(
         ctx.y_obs, ctx.n_points, ctx.tilt_step, ctx.tilt_axis,
-        extent=ctx.extent, seed=ctx.seed,
+        extent=ctx.extent, vol_size=ctx.tomo_vol,
+        carve_quantile=ctx.tomo_quantile, seed=ctx.seed,
     )
 
 

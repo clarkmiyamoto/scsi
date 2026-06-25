@@ -218,16 +218,21 @@ def backproject_tomo(
     tilt_step: float,
     tilt_axis: str = "y",
     extent: float = 2.0,
-    vol_size: int = 32,
+    vol_size: int = 48,
+    carve_quantile: float = 0.15,
     seed: int = 0,
 ) -> torch.Tensor:
-    """Tomographic back-projection lift of a K-tilt series into a point cloud for pi(0).
+    """Space-carving lift of a K-tilt series into a point cloud for pi(0).
 
     Builds a ``vol_size^3`` occupancy grid in ``[-extent, extent]^3``: for each known
     tilt, rotate the voxel centres by ``R_tilt[n]``, orthographically project (drop
-    z), and bilinearly sample that tilt's image; sum the back-projected intensity over
-    tilts. Then sample ``n_points`` voxels with probability proportional to the
-    (clamped) occupancy, with sub-voxel jitter.
+    z), and bilinearly sample that tilt's image. A voxel of the object must land
+    *inside* the bright region in (nearly) every view, so the occupancy is a **soft
+    space carve** -- each tilt is normalised and the occupancy is a low quantile over
+    tilts (``carve_quantile``; 0.0 = strict intersection / min, 0.5 = median). This is
+    a visual-hull reconstruction, NOT a sum: an unfiltered sum-back-projection would
+    smear credit along every ray and yield a blurry blob. Then sample ``n_points``
+    voxels with probability proportional to the occupancy, with sub-voxel jitter.
 
     Only the *known* tilt geometry is used (not the unknown global ``theta``), so the
     reconstruction lives in the lab frame (``= R(theta) . x_canonical``) -- a valid
@@ -256,7 +261,9 @@ def backproject_tomo(
         sampled = F.grid_sample(
             imgs, uv, mode="bilinear", align_corners=True, padding_mode="zeros"
         )                                                          # (K, 1, 1, M)
-        occ = sampled.view(K, M).clamp(min=0).sum(dim=0)           # (M,)
+        s = sampled.view(K, M).clamp(min=0)                        # (K, M)
+        s = s / s.amax(dim=1, keepdim=True).clamp_min(1e-6)        # per-tilt normalize
+        occ = torch.quantile(s, carve_quantile, dim=0)            # (M,) soft space carving
         w = occ + 1e-6
         w = w / w.sum()
         idx = torch.multinomial(w, n_points, replacement=True, generator=g)
