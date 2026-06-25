@@ -179,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--pretrain-steps", type=int, default=2000,
         help="[bootstrap=perturbed] flow-matching steps to pre-train pi(0) before EM",
     )
+    pe.add_argument(
+        "--pretrain-log-every", type=int, default=100,
+        help="[bootstrap=perturbed] print cadence (loss/EMA/grad-norm/it-s) during pretraining",
+    )
+    pe.add_argument(
+        "--pretrain-eval-every", type=int, default=500,
+        help="[bootstrap=perturbed] cadence for GT|obs|pi|F(pi) sample panels during pretraining",
+    )
     pe.add_argument("--n-eval", type=int, default=4, help="objects shown in eval panels")
     pe.add_argument("--seed", type=int, default=0)
     pe.add_argument("--no-amp", action="store_true", help="disable mixed precision")
@@ -322,6 +330,8 @@ def main(argv: list[str] | None = None) -> None:
                     so2_axis=args.so2_axis, coord_noise_std=args.coord_noise_std,
                     n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
                     tomo_vol=args.tomo_vol, tomo_quantile=args.tomo_quantile,
+                    pretrain_log_every=args.pretrain_log_every,
+                    pretrain_eval_every=args.pretrain_eval_every,
                     dataset=args.dataset, dataset_eps=args.dataset_eps,
                 )
 

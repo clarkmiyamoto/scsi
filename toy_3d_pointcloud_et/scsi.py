@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
@@ -383,6 +384,34 @@ def log_bootstrap(
 # ── Bootstrap: pre-trained rotation prior ──────────────────────────────────────
 
 
+def _plot_loss_curve(
+    losses: list[tuple[int, float]],
+    path: Path,
+    ema: list[tuple[int, float]] | None = None,
+) -> None:
+    """Save a semilog-y loss-vs-step PNG (raw per-step loss + optional EMA)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    steps = [s for s, _ in losses]
+    vals = [v for _, v in losses]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(steps, vals, lw=0.8, alpha=0.5, label="loss")
+    if ema:
+        ax.plot([s for s, _ in ema], [v for _, v in ema], lw=1.6, color="C3", label="EMA")
+    ax.set_yscale("log")
+    ax.set_xlabel("pretrain step")
+    ax.set_ylabel("flow-matching loss")
+    ax.set_title("bootstrap pretraining loss")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    path.parent.mkdir(exist_ok=True)
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
 def pretrain_rotation_prior(
     model: nn.Module,
     y_obs: torch.Tensor,                 # (Nobj, 1, P, P) real observations — CPU
@@ -410,6 +439,12 @@ def pretrain_rotation_prior(
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
+    out_dir: Path | None = None,
+    gt: torch.Tensor | None = None,
+    n_eval: int = 4,
+    viz_ball_radius: float = 0.05,
+    log_every: int = 100,
+    eval_every: int = 500,
 ) -> torch.Tensor:
     """Warmstart pi(0): pre-train ``model`` to generate random rotations of the
     base object conditioned on F(x), then sample pi(0) on the real observations.
@@ -426,13 +461,19 @@ def pretrain_rotation_prior(
     """
     torch.manual_seed(seed)
     print(f"[scsi] bootstrap pre-training: {steps} flow-matching steps on random "
-          f"rotations of the base object")
+          f"rotations of the base object  (log_every={log_every}, eval_every={eval_every})")
 
     opt = torch.optim.AdamW(
         model.parameters(), lr=lr, weight_decay=1e-4, fused=(device.type == "cuda")
     )
     use_scaler = needs_grad_scaler(device, use_amp)
     scaler = torch.amp.GradScaler(enabled=use_scaler)
+
+    n_eval = min(n_eval, y_obs.size(0))
+    losses: list[tuple[int, float]] = []   # (step, loss) for the curve
+    ema_hist: list[tuple[int, float]] = []  # (step, EMA-smoothed loss)
+    ema: float | None = None
+    t_start = time.perf_counter()
 
     model.train()
     for step in range(1, steps + 1):
@@ -461,20 +502,59 @@ def pretrain_rotation_prior(
         if use_scaler:
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            gnorm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
             scaler.step(opt)
             scaler.update()
         else:
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            gnorm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
             opt.step()
 
-        if step % 100 == 0 or step == 1:
-            print(f"    [pretrain] step {step:6d}/{steps}  loss={loss.item():.5f}")
+        lv = loss.item()
+        ema = lv if ema is None else 0.98 * ema + 0.02 * lv
+        losses.append((step, lv))
+        ema_hist.append((step, ema))
+
+        if step % log_every == 0 or step in (1, steps):
+            it_s = step / max(time.perf_counter() - t_start, 1e-6)
+            print(f"    [pretrain] step {step:6d}/{steps}  loss={lv:.5f}  "
+                  f"ema={ema:.5f}  gnorm={gnorm:.3f}  ({it_s:.1f} it/s)")
         if tracker is not None and global_step is not None:
-            tracker.log({"bootstrap/loss": loss.item()}, step=global_step[0])
+            tracker.log(
+                {"bootstrap/loss": lv, "bootstrap/loss_ema": ema, "bootstrap/grad_norm": gnorm},
+                step=global_step[0],
+            )
         if global_step is not None:
             global_step[0] += 1
+
+        # Periodic sample-quality panel: GT | obs | pi | F(pi) from the in-progress model.
+        if out_dir is not None and (step % eval_every == 0 or step == steps):
+            pi_eval, _ = update_prior(
+                model, y_obs[:n_eval], n_points, sample_steps, batch, device, shapes=shapes
+            )
+            gt_eval = gt[:n_eval] if gt is not None else shape_fn(n_eval, n_points, device=device).cpu()
+            log_em_step(
+                gt_eval, y_obs[:n_eval], pi_eval,
+                radius=radius, noise_std=noise_std,
+                image_size=image_size, extent=extent,
+                em_step=step, tracker=tracker, out_dir=out_dir,
+                global_step=global_step or [0], viz_ball_radius=viz_ball_radius,
+                tag="pretrain", shapes=shapes, channel=channel, so2_axis=so2_axis,
+                coord_noise_std=coord_noise_std,
+                n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
+            )
+            model.train()  # update_prior left the model in eval mode
+
+    # Loss curve over the whole pretraining run.
+    if out_dir is not None and losses:
+        curve_path = out_dir / "bootstrap_pretrain_loss.png"
+        _plot_loss_curve(losses, curve_path, ema_hist)
+        print(f"  [pretrain] wrote loss curve {curve_path}")
+        if tracker is not None and tracker.enabled:
+            tracker.log_image(
+                "bootstrap/pretrain_loss_curve", str(curve_path),
+                step=(global_step[0] if global_step is not None else None),
+            )
 
     # Sample pi(0) from the pre-trained model, conditioned on the real observations.
     x_pool, _ = update_prior(model, y_obs, n_points, sample_steps, batch, device, shapes=shapes)
@@ -516,6 +596,8 @@ def scsi_train(
     tilt_axis: str = "y",
     tomo_vol: int = 48,
     tomo_quantile: float = 0.15,
+    pretrain_log_every: int = 100,
+    pretrain_eval_every: int = 500,
     dataset: str = "iid",
     dataset_eps: float = 0.0,
 ) -> ConditionalPointCloudVelocity:
@@ -567,6 +649,8 @@ def scsi_train(
         channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
         n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         tomo_vol=tomo_vol, tomo_quantile=tomo_quantile,
+        eval_dir=eval_dir, viz_ball_radius=viz_ball_radius, n_eval=n_eval, gt=gt,
+        pretrain_log_every=pretrain_log_every, pretrain_eval_every=pretrain_eval_every,
     )
     x_pool = make_bootstrap(bootstrap, ctx)
     z_pool = None

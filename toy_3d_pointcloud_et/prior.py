@@ -24,6 +24,7 @@ The objects it rotates are the ``--shape`` mixture (see :data:`data.SHAPE_SAMPLE
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 import torch
@@ -74,6 +75,14 @@ class BootstrapContext:
     use_amp: bool = True
     tracker: "Tracker | None" = None
     global_step: "list | None" = None  # shared wandb step counter (kept monotonic)
+
+    # ── fields for "perturbed" bootstrap pretraining diagnostics (prints/plots) ─
+    eval_dir: str = "toy3d_pc_eval"     # where pretraining panels / loss curve are written
+    viz_ball_radius: float = 0.05       # ball radius for logged W&B meshes (0 = off)
+    n_eval: int = 4                     # objects shown in pretraining panels
+    gt: "torch.Tensor | None" = None    # clean GT clouds (reference row in the panels)
+    pretrain_log_every: int = 100       # print cadence during pretraining
+    pretrain_eval_every: int = 500      # sample-panel cadence during pretraining
 
 
 BootstrapFn = Callable[[BootstrapContext], torch.Tensor]
@@ -141,6 +150,9 @@ def _perturbed(ctx: BootstrapContext) -> torch.Tensor:
         channel=ctx.channel, so2_axis=ctx.so2_axis,
         coord_noise_std=ctx.coord_noise_std,
         n_tilts=ctx.n_tilts, tilt_step=ctx.tilt_step, tilt_axis=ctx.tilt_axis,
+        out_dir=Path(ctx.eval_dir), gt=ctx.gt, n_eval=ctx.n_eval,
+        viz_ball_radius=ctx.viz_ball_radius,
+        log_every=ctx.pretrain_log_every, eval_every=ctx.pretrain_eval_every,
     )
 
 
