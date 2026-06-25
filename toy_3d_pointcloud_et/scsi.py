@@ -1,13 +1,16 @@
 """Lifted SCSI (Self-Consistent Stochastic Interpolant) for point clouds.
 
 Recovers a generative prior over clean 3D point clouds from only their corrupted
-2D projections, via EM -- the point-cloud analogue of ``toy_3d/scsi_train.py``.
+CryoET tilt-series projections, via three phases:
 
-Per EM iteration k:
-  E-step  train_estep   train b_t on (x ~ pi(k), y_hat = F(x)) pairs:
-                            I_t = (1-t) z + t x,  target = x - z,
-                            loss = || b_t(I_t | y_hat) - (x - z) ||^2
-  M-step  update_prior  sample pi(k+1) = Phi(z' | y_obs) with the conditional ODE.
+  1. GT generation   sample X; freeze observations Y = F_CryoET(X).
+  2. Supervised init tomo-bootstrap X_boot from Y; train b_t on (X_boot, F(X_boot))
+                     for ``pretrain_steps`` epochs (warm-start).
+  3. SCSI EM loop    per iteration k:
+       E-step  train_estep   train b_t on (x ~ pi(k), y_hat = F(x)) pairs:
+                                 I_t = (1-t) z + t x,  target = x - z,
+                                 loss = || b_t(I_t | y_hat) - (x - z) ||^2
+       M-step  update_prior  sample pi(k+1) = Phi(z' | y_obs) with the conditional ODE.
 
 Clean ground-truth clouds are used ONLY to synthesize the fixed observations
 y_obs = F(x_gt) and for visualization; the model never trains on them.
@@ -16,18 +19,15 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from .balls import save_balls_obj
-from .corruption import forward_channel, random_so2, random_so3
+from .corruption import forward_channel
 from .data import make_mixture_sampler, mixture_surface_residual, sample_perturbed_dataset
 from .device import autocast, configure_backends, describe, needs_grad_scaler, synchronize
 from .model import ConditionalPointCloudVelocity
@@ -43,7 +43,7 @@ class ConditionalModelConfig:
     n_points: int = 512
     image_size: int = 32
     patch_size: int = 4
-    in_channels: int = 1  # observation channels: 1 (so3/so2) or K (cryoet tilt series)
+    in_channels: int = 11  # = n_tilts for CryoET
 
 
 def build_conditional_model(
@@ -91,9 +91,7 @@ def train_estep(
     use_amp: bool,
     global_step: list,
     tracker: Tracker | None = None,
-    channel: str = "so3",
     coord_noise_std: float = 0.0,
-    so2_axis: str = "z",
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
@@ -138,7 +136,8 @@ def train_estep(
             with torch.no_grad():
                 y_hat = forward_channel(
                     x1, radius=radius, noise_std=noise_std,
-                    image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                    image_size=image_size, extent=extent,
+                    coord_noise_std=coord_noise_std,
                     n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
                 )
 
@@ -178,7 +177,7 @@ def train_estep(
 @torch.inference_mode()
 def update_prior(
     model: nn.Module,
-    y_obs: torch.Tensor,        # (Nobj, 1, P, P) fixed observations — CPU
+    y_obs: torch.Tensor,        # (Nobj, K, P, P) fixed observations — CPU
     n_points: int,
     n_steps: int,
     batch: int,
@@ -227,7 +226,7 @@ def _set3d(ax, lim: float) -> None:
 
 def log_em_step(
     gt_eval: torch.Tensor,       # (n, N, 3) clean clouds (reference only)
-    y_eval: torch.Tensor,        # (n, C, P, P) fixed observations
+    y_eval: torch.Tensor,        # (n, K, P, P) fixed observations
     pi_eval: torch.Tensor,       # (n, N, 3) current prior samples
     radius: float,
     noise_std: float,
@@ -240,16 +239,14 @@ def log_em_step(
     viz_ball_radius: float,
     tag: str = "EM step",
     shapes: list[str] | None = None,
-    channel: str = "so3",
     coord_noise_std: float = 0.0,
-    so2_axis: str = "z",
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
 ) -> None:
     """4-row panel: GT cloud | y_obs | pi(k) sample | F(pi(k)) consistency check.
 
-    For a CryoET tilt series (C = K channels) the central tilt is shown.
+    The central tilt is shown for the CryoET K-channel observation.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -259,11 +256,12 @@ def log_em_step(
     with torch.no_grad():
         y_pi = forward_channel(
             pi_eval, radius=radius, noise_std=noise_std,
-            image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            image_size=image_size, extent=extent,
+            coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
 
-    ch = y_eval.shape[1] // 2  # central tilt for a K-tilt series; 0 for one projection
+    ch = y_eval.shape[1] // 2  # central tilt
     gt_np = gt_eval.cpu().numpy()
     pi_np = pi_eval.cpu().numpy()
     yobs_np = y_eval[:, ch].cpu().numpy()
@@ -320,7 +318,6 @@ def log_em_step(
 
 def log_bootstrap(
     pi0: torch.Tensor,            # (n, N, 3) bootstrap reconstruction pi(0)
-    bootstrap: str,
     tracker: Tracker | None,
     out_dir: Path,
     global_step: list,
@@ -328,12 +325,7 @@ def log_bootstrap(
     gt: torch.Tensor | None = None,   # (n, N, 3) reference clouds (optional)
     shapes: list[str] | None = None,
 ) -> None:
-    """Visualize the bootstrap pi(0) reconstruction and log it to disk + W&B.
-
-    Renders the initial point cloud (e.g. the tomographic back-projection) as a 3D
-    scatter PNG, an interactive ``wandb.Object3D`` cloud, and a union-of-balls mesh,
-    before any EM refinement. With ``gt`` given, the clean reference is shown beneath.
-    """
+    """Visualize the tomo bootstrap pi(0) reconstruction and log it to disk + W&B."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -350,7 +342,7 @@ def log_bootstrap(
         ax.scatter(pi_np[j, :, 0], pi_np[j, :, 1], pi_np[j, :, 2], s=2, alpha=0.6, color="C1")
         _set3d(ax, lim)
         if j == 0:
-            ax.set_title(f"pi(0)  [{bootstrap}]", fontsize=9)
+            ax.set_title("pi(0)  [tomo]", fontsize=9)
         if gt_np is not None:
             ax2 = fig.add_subplot(rows, n, n + j + 1, projection="3d")
             ax2.scatter(gt_np[j, :, 0], gt_np[j, :, 1], gt_np[j, :, 2], s=2, alpha=0.6)
@@ -358,10 +350,10 @@ def log_bootstrap(
             if j == 0:
                 ax2.set_title("GT cloud", fontsize=9)
 
-    fig.suptitle(f"bootstrap pi(0): {bootstrap}", fontsize=12)
+    fig.suptitle("bootstrap pi(0): tomo", fontsize=12)
     fig.tight_layout()
     out_dir.mkdir(exist_ok=True)
-    path = out_dir / f"bootstrap_{bootstrap}_pi0.png"
+    path = out_dir / "bootstrap_tomo_pi0.png"
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)
     resid = mixture_surface_residual(pi0, shapes or ["torus"]).item()
@@ -381,186 +373,6 @@ def log_bootstrap(
         tracker.log({"bootstrap/surface_residual": resid}, step=global_step[0])
 
 
-# ── Bootstrap: pre-trained rotation prior ──────────────────────────────────────
-
-
-def _plot_loss_curve(
-    losses: list[tuple[int, float]],
-    path: Path,
-    ema: list[tuple[int, float]] | None = None,
-) -> None:
-    """Save a semilog-y loss-vs-step PNG (raw per-step loss + optional EMA)."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    steps = [s for s, _ in losses]
-    vals = [v for _, v in losses]
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(steps, vals, lw=0.8, alpha=0.5, label="loss")
-    if ema:
-        ax.plot([s for s, _ in ema], [v for _, v in ema], lw=1.6, color="C3", label="EMA")
-    ax.set_yscale("log")
-    ax.set_xlabel("pretrain step")
-    ax.set_ylabel("flow-matching loss")
-    ax.set_title("bootstrap pretraining loss")
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    path.parent.mkdir(exist_ok=True)
-    fig.savefig(path, dpi=110)
-    plt.close(fig)
-
-
-def pretrain_rotation_prior(
-    model: nn.Module,
-    y_obs: torch.Tensor,                 # (Nobj, 1, P, P) real observations — CPU
-    *,
-    shape_fn: Callable[..., torch.Tensor],
-    n_points: int,
-    radius: float,
-    noise_std: float,
-    image_size: int,
-    extent: float,
-    steps: int,
-    batch: int,
-    lr: float,
-    sample_steps: int,
-    device: torch.device,
-    use_amp: bool,
-    seed: int,
-    perturb_std: float = 0.0,
-    shapes: list[str] | None = None,
-    tracker: Tracker | None = None,
-    global_step: list | None = None,
-    channel: str = "so3",
-    coord_noise_std: float = 0.0,
-    so2_axis: str = "z",
-    n_tilts: int = 11,
-    tilt_step: float = 12.0,
-    tilt_axis: str = "y",
-    out_dir: Path | None = None,
-    gt: torch.Tensor | None = None,
-    n_eval: int = 4,
-    viz_ball_radius: float = 0.05,
-    log_every: int = 100,
-    eval_every: int = 500,
-) -> torch.Tensor:
-    """Warmstart pi(0): pre-train ``model`` to generate random rotations of the
-    base object conditioned on F(x), then sample pi(0) on the real observations.
-
-    Each step draws fresh canonical clouds from ``shape_fn``, rotates each by an
-    independent random rotation matching the ``channel`` (full SO(3), or SO(2) about
-    ``so2_axis``), renders ``y = F(rotated)`` with F's own fresh random pose and
-    coordinate noise (the
-    marginalize-over-pose channel), and takes a flow-matching step on the pair
-    ``(rotated, y)``. Rotating the *target* is what lets the recovered prior cover all
-    orientations instead of collapsing to the canonical frame. The trained weights are
-    kept -- they warm-start the EM model. ``perturb_std`` adds optional 3D jitter to
-    the targets (0 = clean). Returns x_pool (Nobj, N, 3) CPU.
-    """
-    torch.manual_seed(seed)
-    print(f"[scsi] bootstrap pre-training: {steps} flow-matching steps on random "
-          f"rotations of the base object  (log_every={log_every}, eval_every={eval_every})")
-
-    opt = torch.optim.AdamW(
-        model.parameters(), lr=lr, weight_decay=1e-4, fused=(device.type == "cuda")
-    )
-    use_scaler = needs_grad_scaler(device, use_amp)
-    scaler = torch.amp.GradScaler(enabled=use_scaler)
-
-    n_eval = min(n_eval, y_obs.size(0))
-    losses: list[tuple[int, float]] = []   # (step, loss) for the curve
-    ema_hist: list[tuple[int, float]] = []  # (step, EMA-smoothed loss)
-    ema: float | None = None
-    t_start = time.perf_counter()
-
-    model.train()
-    for step in range(1, steps + 1):
-        x1 = shape_fn(batch, n_points, device=device)        # canonical clouds
-        R = random_so2(batch, device, axis=so2_axis) if channel == "so2" else random_so3(batch, device)
-        x1 = torch.matmul(x1, R.transpose(-1, -2))           # random rotation per cloud
-        if perturb_std > 0:
-            x1 = x1 + perturb_std * torch.randn_like(x1)
-        with torch.no_grad():
-            y = forward_channel(
-                x1, radius=radius, noise_std=noise_std,
-                image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
-                n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
-            )                                                # fresh random pose in F
-        z = torch.randn_like(x1)
-
-        with autocast(device, use_amp):
-            t = torch.rand(batch, device=device)
-            tt = t[:, None, None]
-            xt = (1.0 - tt) * z + tt * x1                    # I_t  (linear interpolant)
-            target = x1 - z                                  # dI_t/dt
-            pred = model(xt, t, y)
-            loss = (pred - target).pow(2).mean()
-
-        opt.zero_grad(set_to_none=True)
-        if use_scaler:
-            scaler.scale(loss).backward()
-            scaler.unscale_(opt)
-            gnorm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
-            scaler.step(opt)
-            scaler.update()
-        else:
-            loss.backward()
-            gnorm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
-            opt.step()
-
-        lv = loss.item()
-        ema = lv if ema is None else 0.98 * ema + 0.02 * lv
-        losses.append((step, lv))
-        ema_hist.append((step, ema))
-
-        if step % log_every == 0 or step in (1, steps):
-            it_s = step / max(time.perf_counter() - t_start, 1e-6)
-            print(f"    [pretrain] step {step:6d}/{steps}  loss={lv:.5f}  "
-                  f"ema={ema:.5f}  gnorm={gnorm:.3f}  ({it_s:.1f} it/s)")
-        if tracker is not None and global_step is not None:
-            tracker.log(
-                {"bootstrap/loss": lv, "bootstrap/loss_ema": ema, "bootstrap/grad_norm": gnorm},
-                step=global_step[0],
-            )
-        if global_step is not None:
-            global_step[0] += 1
-
-        # Periodic sample-quality panel: GT | obs | pi | F(pi) from the in-progress model.
-        if out_dir is not None and (step % eval_every == 0 or step == steps):
-            pi_eval, _ = update_prior(
-                model, y_obs[:n_eval], n_points, sample_steps, batch, device, shapes=shapes
-            )
-            gt_eval = gt[:n_eval] if gt is not None else shape_fn(n_eval, n_points, device=device).cpu()
-            log_em_step(
-                gt_eval, y_obs[:n_eval], pi_eval,
-                radius=radius, noise_std=noise_std,
-                image_size=image_size, extent=extent,
-                em_step=step, tracker=tracker, out_dir=out_dir,
-                global_step=global_step or [0], viz_ball_radius=viz_ball_radius,
-                tag="pretrain", shapes=shapes, channel=channel, so2_axis=so2_axis,
-                coord_noise_std=coord_noise_std,
-                n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
-            )
-            model.train()  # update_prior left the model in eval mode
-
-    # Loss curve over the whole pretraining run.
-    if out_dir is not None and losses:
-        curve_path = out_dir / "bootstrap_pretrain_loss.png"
-        _plot_loss_curve(losses, curve_path, ema_hist)
-        print(f"  [pretrain] wrote loss curve {curve_path}")
-        if tracker is not None and tracker.enabled:
-            tracker.log_image(
-                "bootstrap/pretrain_loss_curve", str(curve_path),
-                step=(global_step[0] if global_step is not None else None),
-            )
-
-    # Sample pi(0) from the pre-trained model, conditioned on the real observations.
-    x_pool, _ = update_prior(model, y_obs, n_points, sample_steps, batch, device, shapes=shapes)
-    return x_pool
-
-
 # ── EM driver ─────────────────────────────────────────────────────────────────
 
 
@@ -577,8 +389,6 @@ def scsi_train(
     extent: float = 2.0,
     sample_steps: int = 50,
     coupled_fraction: float = 0.0,
-    bootstrap: str = "backproject",
-    perturb_std: float = 0.0,
     shapes: list[str] | None = None,
     pretrain_steps: int = 2000,
     n_eval: int = 4,
@@ -588,16 +398,12 @@ def scsi_train(
     out: str = "scsi_checkpoint.pt",
     eval_dir: str = "toy3d_pc_eval",
     viz_ball_radius: float = 0.05,
-    channel: str = "so3",
     coord_noise_std: float = 0.0,
-    so2_axis: str = "z",
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
     tomo_vol: int = 48,
     tomo_quantile: float = 0.15,
-    pretrain_log_every: int = 100,
-    pretrain_eval_every: int = 500,
     dataset: str = "iid",
     dataset_eps: float = 0.0,
 ) -> ConditionalPointCloudVelocity:
@@ -611,60 +417,67 @@ def scsi_train(
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[scsi] parameters: {n_params:,}")
 
-    # Clean ground-truth clouds: used ONLY to make y_obs and for visualization.
+    # Phase 1: ground-truth clouds — used ONLY to make y_obs and for visualization.
     if dataset == "template":
-        # Subtomogram-averaging dataset: N bounded perturbations of fixed template(s).
         gt = sample_perturbed_dataset(
             shapes, n_objects, cfg.n_points, dataset_eps, device=device
-        )                                                            # (Nobj, N, 3)
+        )
         print(f"[scsi] dataset=template  eps={dataset_eps}  "
               f"(perturbed copies of fixed {'/'.join(shapes)} template(s))")
     else:
-        gt = sample_fn(n_objects, cfg.n_points, device=device)       # (Nobj, N, 3)
+        gt = sample_fn(n_objects, cfg.n_points, device=device)
     with torch.no_grad():
         y_obs = forward_channel(
             gt, radius=radius, noise_std=noise_std,
-            image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            image_size=cfg.image_size, extent=extent,
+            coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
-        )                                                            # frozen observations
+        )
     gt, y_obs = gt.cpu(), y_obs.cpu()
     print(f"[scsi] y_obs {tuple(y_obs.shape)}  range=[{y_obs.min():.2f}, {y_obs.max():.2f}]")
 
     out_dir = Path(eval_dir)
     ckpt_dir = Path("toy3d_pc_scsi_checkpoints")
     ckpt_dir.mkdir(exist_ok=True)
-    global_step = [0]  # shared wandb step; the "perturbed" bootstrap advances it too
+    global_step = [0]
 
-    # Bootstrap pi(0). The "perturbed" bootstrap pre-trains `model` (fields below);
-    # the others ignore the model / pre-training fields and just build a pool.
+    # Phase 2a: tomo bootstrap -> X_boot.
     ctx = BootstrapContext(
         y_obs=y_obs, n_objects=n_objects, n_points=cfg.n_points,
         extent=extent, seed=seed,
-        shapes=shapes, perturb_std=perturb_std,
-        model=model, device=device,
-        radius=radius, noise_std=noise_std, image_size=cfg.image_size,
-        pretrain_steps=pretrain_steps, batch=batch, lr=lr,
-        sample_steps=sample_steps, use_amp=use_amp,
-        tracker=tracker, global_step=global_step,
-        channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
-        n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
+        tilt_step=tilt_step, tilt_axis=tilt_axis,
         tomo_vol=tomo_vol, tomo_quantile=tomo_quantile,
-        eval_dir=eval_dir, viz_ball_radius=viz_ball_radius, n_eval=n_eval, gt=gt,
-        pretrain_log_every=pretrain_log_every, pretrain_eval_every=pretrain_eval_every,
     )
-    x_pool = make_bootstrap(bootstrap, ctx)
+    x_pool = make_bootstrap("tomo", ctx)
     z_pool = None
-    print(f"[scsi] bootstrap={bootstrap}  pi(0) {tuple(x_pool.shape)}")
+    print(f"[scsi] tomo bootstrap  pi(0) {tuple(x_pool.shape)}")
 
     n_eval = min(n_eval, n_objects)
     gt_eval, y_eval = gt[:n_eval], y_obs[:n_eval]
 
-    # Visualize the bootstrap reconstruction pi(0) before any EM refinement.
+    # Visualize the tomo bootstrap reconstruction pi(0) before any training.
     log_bootstrap(
-        x_pool[:n_eval], bootstrap, tracker, out_dir, global_step,
+        x_pool[:n_eval], tracker, out_dir, global_step,
         viz_ball_radius, gt=gt_eval, shapes=shapes,
     )
 
+    # Phase 2b: supervised pretraining on X_boot.
+    # Train b_t(I_t | y_hat) on (X_boot, F(X_boot)) pairs to warm-start the model.
+    if pretrain_steps > 0:
+        print(f"[scsi] supervised pretraining: {pretrain_steps} epochs on tomo X_boot")
+        train_estep(
+            model, x_pool, None, 0.0,
+            radius=radius, noise_std=noise_std,
+            image_size=cfg.image_size, extent=extent,
+            epochs=pretrain_steps, batch=batch, lr=lr,
+            device=device, use_amp=use_amp,
+            global_step=global_step, tracker=tracker,
+            coord_noise_std=coord_noise_std,
+            n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
+        )
+        save_checkpoint(str(ckpt_dir / "model_pretrain.pt"), model, cfg)
+
+    # Phase 3: SCSI EM loop.
     for k in range(em_steps):
         print("=" * 60)
         print(f"EM iteration {k} / {em_steps}")
@@ -676,7 +489,8 @@ def scsi_train(
             image_size=cfg.image_size, extent=extent,
             epochs=epochs_per_em, batch=batch, lr=lr,
             device=device, use_amp=use_amp,
-            global_step=global_step, tracker=tracker, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            global_step=global_step, tracker=tracker,
+            coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
         save_checkpoint(str(ckpt_dir / f"model_em{k:04d}.pt"), model, cfg)
@@ -693,7 +507,7 @@ def scsi_train(
             image_size=cfg.image_size, extent=extent,
             em_step=k, tracker=tracker, out_dir=out_dir,
             global_step=global_step, viz_ball_radius=viz_ball_radius,
-            shapes=shapes, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            shapes=shapes, coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
 
@@ -702,7 +516,7 @@ def scsi_train(
     return model
 
 
-# ── Supervised baseline (debug) ───────────────────────────────────────────────
+# ── Supervised baseline (debug oracle) ────────────────────────────────────────
 
 
 def train_supervised(
@@ -724,17 +538,16 @@ def train_supervised(
     out: str = "scsi_checkpoint.pt",
     eval_dir: str = "toy3d_pc_eval",
     viz_ball_radius: float = 0.05,
-    channel: str = "so3",
     coord_noise_std: float = 0.0,
-    so2_axis: str = "z",
     n_tilts: int = 11,
     tilt_step: float = 12.0,
     tilt_axis: str = "y",
 ) -> ConditionalPointCloudVelocity:
-    """Supervised oracle: train b_t directly on the coupling (x, F(x)) with unlimited
-    fresh ground truth. No EM, pool, or bootstrap -- the upper bound / sanity check
-    for ``scsi_train``. If this learns the shape(s) but SCSI doesn't, the fault is in
-    the EM dynamics, not the model / channel / conditioning.
+    """Supervised oracle: train b_t directly on (x, F(x)) with unlimited fresh GT.
+
+    No EM, pool, or bootstrap -- the upper bound / sanity check for ``scsi_train``.
+    If this learns the shape(s) but SCSI doesn't, the fault is in the EM dynamics,
+    not the model / channel / conditioning.
     """
     torch.manual_seed(seed)
     configure_backends(device)
@@ -751,7 +564,8 @@ def train_supervised(
     with torch.no_grad():
         y_eval = forward_channel(
             gt_eval, radius=radius, noise_std=noise_std,
-            image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            image_size=cfg.image_size, extent=extent,
+            coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
     gt_eval, y_eval = gt_eval.cpu(), y_eval.cpu()
@@ -769,13 +583,14 @@ def train_supervised(
 
     model.train()
     for step in range(1, steps + 1):
-        x1 = sample_fn(batch, cfg.n_points, device=device)      # fresh GT every step
+        x1 = sample_fn(batch, cfg.n_points, device=device)
         with torch.no_grad():
             y = forward_channel(
                 x1, radius=radius, noise_std=noise_std,
-                image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                image_size=cfg.image_size, extent=extent,
+                coord_noise_std=coord_noise_std,
                 n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
-            )                                                    # fresh random pose
+            )
         z = torch.randn_like(x1)
 
         with autocast(device, use_amp):
@@ -815,7 +630,7 @@ def train_supervised(
                 image_size=cfg.image_size, extent=extent,
                 em_step=step, tracker=tracker, out_dir=out_dir,
                 global_step=global_step, viz_ball_radius=viz_ball_radius,
-                tag="supervised", shapes=shapes, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                tag="supervised", shapes=shapes, coord_noise_std=coord_noise_std,
                 n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
             )
             save_checkpoint(str(ckpt_dir / f"model_sup{step:06d}.pt"), model, cfg)

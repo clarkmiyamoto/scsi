@@ -9,7 +9,6 @@ import torch
 from .data import available_shapes, torus_surface_residual
 from .device import resolve_device
 from .flow import ModelConfig, load_checkpoint, sample, save_checkpoint, train
-from .prior import available_bootstraps
 from .tracking import Tracker
 
 
@@ -87,9 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--png-max-balls", type=int, default=200, help="balls per PNG panel")
     _add_wandb_args(pb)
 
-    # ---- scsi: lifted SCSI -- recover a 3D cloud prior from 2D projections ----
+    # ---- scsi: lifted SCSI -- recover a 3D cloud prior from CryoET projections ----
     pe = sub.add_parser(
-        "scsi", help="lifted SCSI: recover a 3D point-cloud prior from 2D projections via EM"
+        "scsi",
+        help="lifted SCSI: recover a 3D point-cloud prior from CryoET tilt-series "
+             "projections via tomo bootstrap + supervised pretraining + EM",
     )
     _add_model_args(pe)  # --dim --depth --heads --n-points
     pe.add_argument("--image-size", type=int, default=32, help="projection / conditioning P")
@@ -98,8 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--supervised", action="store_true",
         help="debug oracle: train directly on (x, F(x)) with unlimited fresh ground "
              "truth instead of EM (ignores --n-objects/--em-steps/--epochs-per-em/"
-             "--bootstrap/--perturb-std/--pretrain-steps/--coupled-fraction; "
-             "uses --steps/--eval-every/--shape)",
+             "--pretrain-steps/--coupled-fraction; uses --steps/--eval-every/--shape)",
     )
     pe.add_argument("--steps", type=int, default=4000, help="[supervised] gradient steps")
     pe.add_argument("--eval-every", type=int, default=500, help="[supervised] eval panel cadence")
@@ -116,49 +116,33 @@ def build_parser() -> argparse.ArgumentParser:
                          "particle), added before rotation; the full channel is P G (X+W)+Z")
     pe.add_argument("--extent", type=float, default=2.0, help="world half-extent mapped to the image")
     pe.add_argument(
-        "--channel", choices=["so3", "so2", "cryoet"], default="so3",
-        help="forward channel: 'so3' full random 3D pose (1 projection), 'so2' "
-             "single-axis pose (see --so2-axis), or 'cryoet' a K-projection tilt series "
-             "(unknown global SO(3) pose + known tilts; see --n-tilts/--tilt-step/--tilt-axis)",
-    )
-    pe.add_argument(
-        "--so2-axis", choices=["x", "y", "z"], default="z",
-        help="[--channel so2] rotation axis: 'z' spins the projection in-plane; 'x'/'y' "
-             "tilt the object out of plane",
-    )
-    pe.add_argument(
         "--n-tilts", type=int, default=11,
-        help="[--channel cryoet] number of projections K in the tilt series",
+        help="number of projections K in the CryoET tilt series",
     )
     pe.add_argument(
         "--tilt-step", type=float, default=12.0,
-        help="[--channel cryoet] degrees between consecutive tilts (K tilts centred at 0)",
+        help="degrees between consecutive tilts (K tilts centred at 0)",
     )
     pe.add_argument(
         "--tilt-axis", choices=["x", "y"], default="y",
-        help="[--channel cryoet] tilt axis (out-of-plane; 'z' would be in-plane/degenerate)",
+        help="tilt axis (out-of-plane; 'z' would be in-plane/degenerate)",
     )
     pe.add_argument(
         "--tomo-vol", type=int, default=48,
-        help="[--bootstrap tomo] back-projection grid resolution (vol^3)",
+        help="tomo bootstrap back-projection grid resolution (vol^3)",
     )
     pe.add_argument(
         "--tomo-quantile", type=float, default=0.15,
-        help="[--bootstrap tomo] space-carving quantile over tilts "
+        help="tomo bootstrap space-carving quantile over tilts "
              "(0.0 = strict intersection/min, 0.5 = median)",
     )
     pe.add_argument("--sample-steps", type=int, default=50, help="M-step Euler ODE steps")
     pe.add_argument("--coupled-fraction", type=float, default=0.0,
                     help="fraction of E-step batch using paired z from the M-step")
     pe.add_argument(
-        "--bootstrap", choices=available_bootstraps(), default="backproject",
-        help="warmstart pi(0); see prior.py for the registry",
-    )
-    pe.add_argument(
         "--shape", nargs="+", choices=available_shapes(), default=["torus"],
         metavar="SHAPE",
-        help="dataset shape(s) as a uniform mixture, e.g. --shape cylinder torus. The GT "
-             "observations and the bootstrap=perturbed warmup are both drawn from these.",
+        help="dataset shape(s) as a uniform mixture, e.g. --shape cylinder torus",
     )
     pe.add_argument(
         "--dataset", choices=["iid", "template"], default="iid",
@@ -172,20 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
              "(||delta_n|| <= eps); 0 = identical copies of the template",
     )
     pe.add_argument(
-        "--perturb-std", type=float, default=0.0,
-        help="[bootstrap=perturbed] optional 3D jitter on the targets (0 = clean)",
-    )
-    pe.add_argument(
         "--pretrain-steps", type=int, default=2000,
-        help="[bootstrap=perturbed] flow-matching steps to pre-train pi(0) before EM",
-    )
-    pe.add_argument(
-        "--pretrain-log-every", type=int, default=100,
-        help="[bootstrap=perturbed] print cadence (loss/EMA/grad-norm/it-s) during pretraining",
-    )
-    pe.add_argument(
-        "--pretrain-eval-every", type=int, default=500,
-        help="[bootstrap=perturbed] cadence for GT|obs|pi|F(pi) sample panels during pretraining",
+        help="epochs of supervised pretraining on the tomo bootstrap X_boot before EM",
     )
     pe.add_argument("--n-eval", type=int, default=4, help="objects shown in eval panels")
     pe.add_argument("--seed", type=int, default=0)
@@ -270,10 +242,10 @@ def main(argv: list[str] | None = None) -> None:
                 config={**vars(args), "device": device.type},
                 job_type="sample",
             ) as tracker:
-                tracker.log_clouds("samples_3d", clouds)          # interactive 3D
+                tracker.log_clouds("samples_3d", clouds)
                 tracker.log({"surface_residual": residual})
                 if args.out_png:
-                    tracker.log_image("samples_png", args.out_png)  # static PNG too
+                    tracker.log_image("samples_png", args.out_png)
 
     elif args.cmd == "scsi":
         from .scsi import ConditionalModelConfig, scsi_train, train_supervised
@@ -290,7 +262,7 @@ def main(argv: list[str] | None = None) -> None:
         cfg = ConditionalModelConfig(
             dim=args.dim, depth=args.depth, heads=args.heads,
             n_points=args.n_points, image_size=args.image_size, patch_size=args.patch_size,
-            in_channels=(args.n_tilts if args.channel == "cryoet" else 1),
+            in_channels=args.n_tilts,
         )
         tracker = Tracker(
             enabled=args.wandb,
@@ -309,8 +281,8 @@ def main(argv: list[str] | None = None) -> None:
                     eval_every=args.eval_every,
                     use_amp=not args.no_amp, seed=args.seed, shapes=args.shape,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                    viz_ball_radius=args.viz_ball_radius, channel=args.channel,
-                    so2_axis=args.so2_axis, coord_noise_std=args.coord_noise_std,
+                    viz_ball_radius=args.viz_ball_radius,
+                    coord_noise_std=args.coord_noise_std,
                     n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
                 )
             else:
@@ -321,24 +293,20 @@ def main(argv: list[str] | None = None) -> None:
                     batch=args.batch, lr=args.lr,
                     radius=args.radius, noise_std=args.noise_std, extent=args.extent,
                     sample_steps=args.sample_steps, coupled_fraction=args.coupled_fraction,
-                    bootstrap=args.bootstrap, perturb_std=args.perturb_std,
                     shapes=args.shape, pretrain_steps=args.pretrain_steps,
                     n_eval=args.n_eval,
                     use_amp=not args.no_amp, seed=args.seed,
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                    viz_ball_radius=args.viz_ball_radius, channel=args.channel,
-                    so2_axis=args.so2_axis, coord_noise_std=args.coord_noise_std,
+                    viz_ball_radius=args.viz_ball_radius,
+                    coord_noise_std=args.coord_noise_std,
                     n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
                     tomo_vol=args.tomo_vol, tomo_quantile=args.tomo_quantile,
-                    pretrain_log_every=args.pretrain_log_every,
-                    pretrain_eval_every=args.pretrain_eval_every,
                     dataset=args.dataset, dataset_eps=args.dataset_eps,
                 )
 
     elif args.cmd == "balls":
         from .balls import render_balls_png, save_balls_obj
 
-        # Get clouds: either generate from a checkpoint or load a .npy file.
         if args.ckpt:
             model, cfg = load_checkpoint(args.ckpt, device)
             n_points = args.n_points or cfg.n_points
@@ -348,7 +316,7 @@ def main(argv: list[str] | None = None) -> None:
             ).cpu().numpy()
         else:
             clouds = np.load(args.npy)
-        if clouds.ndim == 2:           # single (N,3) cloud -> (1,N,3)
+        if clouds.ndim == 2:
             clouds = clouds[None]
         n = clouds.shape[0]
 
@@ -373,8 +341,8 @@ def main(argv: list[str] | None = None) -> None:
                 config={**vars(args), "device": device.type},
                 job_type="balls",
             ) as tracker:
-                tracker.log_clouds("samples_3d", torch.from_numpy(clouds))  # points
-                tracker.log_meshes("samples_balls", obj_paths)             # ball mesh
+                tracker.log_clouds("samples_3d", torch.from_numpy(clouds))
+                tracker.log_meshes("samples_balls", obj_paths)
                 if args.out_png:
                     tracker.log_image("samples_balls_png", args.out_png)
 

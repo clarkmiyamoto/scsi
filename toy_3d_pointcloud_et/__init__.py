@@ -1,10 +1,11 @@
 """Flow matching generative model over 3D point clouds (CUDA / MPS optimized).
 
 Also includes lifted SCSI (``scsi`` subcommand): recover a generative prior over
-clean 3D point clouds from only their corrupted 2D projections, via EM.
+clean 3D point clouds from only their corrupted CryoET tilt-series projections,
+via tomo bootstrap + supervised pretraining + EM.
 """
 from .balls import point_cloud_to_balls, save_balls_obj
-from .corruption import backproject_bootstrap, forward_channel, random_so2, random_so3
+from .corruption import backproject_tomo, forward_channel
 from .data import (
     available_shapes,
     make_mixture_sampler,
@@ -31,7 +32,6 @@ from .prior import (
 from .scsi import (
     ConditionalModelConfig,
     build_conditional_model,
-    pretrain_rotation_prior,
     scsi_train,
     train_supervised,
 )
@@ -50,9 +50,7 @@ __all__ = [
     "save_balls_obj",
     # corruption channel F
     "forward_channel",
-    "random_so2",
-    "random_so3",
-    "backproject_bootstrap",
+    "backproject_tomo",
     # shapes / dataset
     "sample_torus",
     "sample_cylinder",
@@ -68,7 +66,6 @@ __all__ = [
     "ConditionalPointCloudVelocity",
     "ConditionalModelConfig",
     "build_conditional_model",
-    "pretrain_rotation_prior",
     "scsi_train",
     "train_supervised",
 ]
