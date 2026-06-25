@@ -116,14 +116,27 @@ def build_parser() -> argparse.ArgumentParser:
                          "particle), added before rotation; the full channel is P G (X+W)+Z")
     pe.add_argument("--extent", type=float, default=2.0, help="world half-extent mapped to the image")
     pe.add_argument(
-        "--channel", choices=["so3", "so2"], default="so3",
-        help="rotation group G in the forward channel: 'so3' full random 3D pose, or "
-             "'so2' single-axis pose (see --so2-axis)",
+        "--channel", choices=["so3", "so2", "cryoet"], default="so3",
+        help="forward channel: 'so3' full random 3D pose (1 projection), 'so2' "
+             "single-axis pose (see --so2-axis), or 'cryoet' a K-projection tilt series "
+             "(unknown global SO(3) pose + known tilts; see --n-tilts/--tilt-step/--tilt-axis)",
     )
     pe.add_argument(
         "--so2-axis", choices=["x", "y", "z"], default="z",
         help="[--channel so2] rotation axis: 'z' spins the projection in-plane; 'x'/'y' "
              "tilt the object out of plane",
+    )
+    pe.add_argument(
+        "--n-tilts", type=int, default=11,
+        help="[--channel cryoet] number of projections K in the tilt series",
+    )
+    pe.add_argument(
+        "--tilt-step", type=float, default=12.0,
+        help="[--channel cryoet] degrees between consecutive tilts (K tilts centred at 0)",
+    )
+    pe.add_argument(
+        "--tilt-axis", choices=["x", "y"], default="y",
+        help="[--channel cryoet] tilt axis (out-of-plane; 'z' would be in-plane/degenerate)",
     )
     pe.add_argument("--sample-steps", type=int, default=50, help="M-step Euler ODE steps")
     pe.add_argument("--coupled-fraction", type=float, default=0.0,
@@ -137,6 +150,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SHAPE",
         help="dataset shape(s) as a uniform mixture, e.g. --shape cylinder torus. The GT "
              "observations and the bootstrap=perturbed warmup are both drawn from these.",
+    )
+    pe.add_argument(
+        "--dataset", choices=["iid", "template"], default="iid",
+        help="ground-truth construction: 'iid' = N independent fresh shape samples; "
+             "'template' = N bounded perturbations of fixed canonical template(s) "
+             "(cryo-ET / subtomogram-averaging dataset; see --dataset-eps)",
+    )
+    pe.add_argument(
+        "--dataset-eps", type=float, default=0.0,
+        help="[--dataset template] max per-point perturbation epsilon "
+             "(||delta_n|| <= eps); 0 = identical copies of the template",
     )
     pe.add_argument(
         "--perturb-std", type=float, default=0.0,
@@ -244,10 +268,12 @@ def main(argv: list[str] | None = None) -> None:
             args.batch, args.sample_steps, args.n_eval = 4, 5, 4
             args.steps, args.eval_every = 20, 10
             args.pretrain_steps = 10
+            args.n_tilts = min(args.n_tilts, 5)
 
         cfg = ConditionalModelConfig(
             dim=args.dim, depth=args.depth, heads=args.heads,
             n_points=args.n_points, image_size=args.image_size, patch_size=args.patch_size,
+            in_channels=(args.n_tilts if args.channel == "cryoet" else 1),
         )
         tracker = Tracker(
             enabled=args.wandb,
@@ -268,6 +294,7 @@ def main(argv: list[str] | None = None) -> None:
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
                     viz_ball_radius=args.viz_ball_radius, channel=args.channel,
                     so2_axis=args.so2_axis, coord_noise_std=args.coord_noise_std,
+                    n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
                 )
             else:
                 scsi_train(
@@ -284,6 +311,8 @@ def main(argv: list[str] | None = None) -> None:
                     tracker=tracker, out=args.out, eval_dir=args.eval_dir,
                     viz_ball_radius=args.viz_ball_radius, channel=args.channel,
                     so2_axis=args.so2_axis, coord_noise_std=args.coord_noise_std,
+                    n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
+                    dataset=args.dataset, dataset_eps=args.dataset_eps,
                 )
 
     elif args.cmd == "balls":

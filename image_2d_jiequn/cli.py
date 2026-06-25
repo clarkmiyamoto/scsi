@@ -26,7 +26,7 @@ class Config:
     # data / io
     data_root: str = "./data"
     results_folder: str = "./results_clean"
-    max_images: int = -1            # subset MNIST for fast smoke tests (-1 = all)
+    max_images: int = 500           # subset MNIST (-1 = full dataset)
     num_workers: int = 0
     seed: int = 42
     wandb: bool = False

@@ -2,18 +2,23 @@
 
 The forward model mirrors the cryoEM channel used for voxels in
 ``toy_3d/scsi_train.py`` (random SO(3) pose -> parallel-beam projection -> AWGN),
-but operates directly on a point cloud:
+but operates directly on a point cloud. In operator form it is
 
-    1. rotate the cloud by a random SO(3) matrix,
-    2. orthographically project to the xy-plane (drop z),
+    F(X) = P G (X + W) + Z
+
+applied per cloud:
+
+    0. add coordinate noise W ~ N(0, coord_noise_std^2) to every point (iid per
+       coordinate per particle),
+    1. rotate the cloud by a random rotation G,
+    2. orthographically project P to the xy-plane (drop z),
     3. "place a ball of radius r at every point" and accumulate it into a P x P
        image -- a sum over points of 2D Gaussians of std sigma = radius,
-    4. add white Gaussian noise.
+    4. add white Gaussian image noise Z ~ N(0, noise_std^2).
 
-The pose in step 1 is selectable via ``channel``: ``"so3"`` (full random pose),
-``"so2"`` (single-axis pose, see ``so2_axis``), or ``"awgn_proj"`` -- no rotation at
-all, with the AWGN instead applied directly to the 3D point coordinates (iid per
-coordinate per particle) *before* projection rather than to the rendered image.
+The rotation G is selectable via ``channel``: ``"so3"`` (full random pose) or
+``"so2"`` (single-axis pose, see ``so2_axis``). ``coord_noise_std`` (W) defaults to 0,
+so the rotation-only channels reduce to ``P G X + Z``.
 
 Because SCSI is trained EM-style (the M-step samples a pool under no_grad, the
 E-step trains the velocity field on it), F only ever runs forward; it does not
@@ -53,22 +58,22 @@ def random_so2(
 def forward_channel(
     points: torch.Tensor,           # (B, N, 3)
     radius: float = 0.08,
-    noise_std: float = 0.1,
+    noise_std: float = 0.1,         # Z: white Gaussian image noise
     image_size: int = 32,
     extent: float = 2.0,
     R: torch.Tensor | None = None,  # (B, 3, 3) fixed pose, or None for fresh random
-    channel: str = "so3",           # "so3" | "so2" | "awgn_proj"
+    channel: str = "so3",           # rotation G: "so3" | "so2"
     so2_axis: str = "z",            # axis for the SO(2) pose ("x"/"y"/"z")
+    coord_noise_std: float = 0.0,   # W: AWGN on point coordinates before rotation
 ) -> torch.Tensor:
-    """Render point clouds to noisy 2D projections. Returns (B, 1, P, P).
+    """Render point clouds to noisy 2D projections: ``F(X) = P G (X + W) + Z``.
 
-    ``channel`` picks the pose / noise model:
-      * ``"so3"`` / ``"so2"`` -- rotate by a fresh random pose per cloud when
-        ``R is None`` (the marginalize-over-pose E-step setting; pass a fixed ``R`` to
-        freeze the observations), then add white Gaussian noise to the rendered image.
-      * ``"awgn_proj"`` -- no rotation (``R`` is ignored); the AWGN is instead added to
-        the 3D point coordinates (iid per coordinate per particle) before projection,
-        and no image-pixel noise is applied.
+    Returns (B, 1, P, P). A fresh random pose ``G`` is drawn per cloud when
+    ``R is None`` (the marginalize-over-pose E-step setting); pass a fixed ``R`` to
+    freeze the pose. ``channel`` selects the rotation group (``"so3"`` full pose or
+    ``"so2"`` single-axis about ``so2_axis``). The coordinate noise ``W`` (std
+    ``coord_noise_std``, iid per coordinate per particle) is added *before* the
+    rotation; the image noise ``Z`` (std ``noise_std``) is added to the rendered image.
 
     The ball splat uses the separability of an isotropic 2D Gaussian:
     ``g(dx, dy) = gx(dx) * gy(dy)``, so the image is an einsum over the per-axis
@@ -77,20 +82,18 @@ def forward_channel(
     B, N, _ = points.shape
     device = points.device
 
-    if channel == "awgn_proj":
-        # No rotation; AWGN goes on the coordinates (iid per coordinate per particle)
-        # before projection -- depth (z) noise is marginalized out by the projection.
-        if noise_std > 0:
-            points = points + noise_std * torch.randn_like(points)
-        x_rot = points
-    else:
-        if R is None:
-            R = (
-                random_so2(B, device, axis=so2_axis)
-                if channel == "so2"
-                else random_so3(B, device)
-            )
-        x_rot = torch.matmul(points, R.transpose(-1, -2))   # (B, N, 3)
+    # W: AWGN on coordinates (iid per coordinate per particle), before the rotation.
+    if coord_noise_std > 0:
+        points = points + coord_noise_std * torch.randn_like(points)
+
+    # G: random rotation (fresh per cloud unless a fixed R is supplied).
+    if R is None:
+        R = (
+            random_so2(B, device, axis=so2_axis)
+            if channel == "so2"
+            else random_so3(B, device)
+        )
+    x_rot = torch.matmul(points, R.transpose(-1, -2))   # (B, N, 3)
     px = x_rot[..., 0]                                   # (B, N) -> image columns (x)
     py = x_rot[..., 1]                                   # (B, N) -> image rows (y)
 
@@ -106,8 +109,8 @@ def forward_channel(
     img = torch.einsum("bni,bnj->bij", gy, gx)  # (B, P, P)  [row=y, col=x]
     img = img.unsqueeze(1)                       # (B, 1, P, P)
 
-    # Image-pixel AWGN for the rotation channels; "awgn_proj" already noised the coords.
-    if channel != "awgn_proj" and noise_std > 0:
+    # Z: white Gaussian image noise.
+    if noise_std > 0:
         img = img + noise_std * torch.randn_like(img)
     return img
 

@@ -59,9 +59,12 @@ class BootstrapContext:
     radius: float = 0.08         # ball radius for the channel F
     noise_std: float = 0.1       # AWGN std on the projections F(x)
     image_size: int = 32         # projection size P
-    channel: str = "so3"         # rotation G: "so3" | "so2"
+    channel: str = "so3"         # rotation G: "so3" | "so2" | "cryoet"
     so2_axis: str = "z"          # axis for the SO(2) pose ("x"/"y"/"z")
     coord_noise_std: float = 0.0 # W: AWGN on point coordinates before rotation
+    n_tilts: int = 11            # [cryoet] number of tilt projections K
+    tilt_step: float = 12.0      # [cryoet] degrees between consecutive tilts
+    tilt_axis: str = "y"         # [cryoet] tilt axis ("x"/"y")
     pretrain_steps: int = 2000   # flow-matching steps before EM
     batch: int = 64
     lr: float = 2e-4
@@ -135,6 +138,24 @@ def _perturbed(ctx: BootstrapContext) -> torch.Tensor:
         tracker=ctx.tracker, global_step=ctx.global_step,
         channel=ctx.channel, so2_axis=ctx.so2_axis,
         coord_noise_std=ctx.coord_noise_std,
+        n_tilts=ctx.n_tilts, tilt_step=ctx.tilt_step, tilt_axis=ctx.tilt_axis,
+    )
+
+
+@register("tomo")
+def _tomo(ctx: BootstrapContext) -> torch.Tensor:
+    """Tomographic back-projection of a CryoET tilt series into a 3D point cloud.
+
+    Lifts the K known-tilt projections in ``ctx.y_obs`` (shape (Nobj, K, P, P)) into a
+    point cloud via 3D back-projection using only the known tilt geometry; the
+    residual global orientation is left for EM to resolve. Intended for
+    ``--channel cryoet``.
+    """
+    from .corruption import backproject_tomo
+
+    return backproject_tomo(
+        ctx.y_obs, ctx.n_points, ctx.tilt_step, ctx.tilt_axis,
+        extent=ctx.extent, seed=ctx.seed,
     )
 
 

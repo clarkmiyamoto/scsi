@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from .balls import save_balls_obj
 from .corruption import forward_channel, random_so2, random_so3
-from .data import make_mixture_sampler, mixture_surface_residual
+from .data import make_mixture_sampler, mixture_surface_residual, sample_perturbed_dataset
 from .device import autocast, configure_backends, describe, needs_grad_scaler, synchronize
 from .model import ConditionalPointCloudVelocity
 from .prior import BootstrapContext, make_bootstrap
@@ -42,6 +42,7 @@ class ConditionalModelConfig:
     n_points: int = 512
     image_size: int = 32
     patch_size: int = 4
+    in_channels: int = 1  # observation channels: 1 (so3/so2) or K (cryoet tilt series)
 
 
 def build_conditional_model(
@@ -53,6 +54,7 @@ def build_conditional_model(
         heads=cfg.heads,
         image_size=cfg.image_size,
         patch_size=cfg.patch_size,
+        in_channels=cfg.in_channels,
     ).to(device)
 
 
@@ -91,6 +93,9 @@ def train_estep(
     channel: str = "so3",
     coord_noise_std: float = 0.0,
     so2_axis: str = "z",
+    n_tilts: int = 11,
+    tilt_step: float = 12.0,
+    tilt_axis: str = "y",
 ) -> None:
     has_z = z_pool is not None and coupled_fraction > 0.0
     dataset = TensorDataset(x_pool, z_pool) if has_z else TensorDataset(x_pool)
@@ -133,6 +138,7 @@ def train_estep(
                 y_hat = forward_channel(
                     x1, radius=radius, noise_std=noise_std,
                     image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                    n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
                 )
 
             with autocast(device, use_amp):
@@ -220,7 +226,7 @@ def _set3d(ax, lim: float) -> None:
 
 def log_em_step(
     gt_eval: torch.Tensor,       # (n, N, 3) clean clouds (reference only)
-    y_eval: torch.Tensor,        # (n, 1, P, P) fixed observations
+    y_eval: torch.Tensor,        # (n, C, P, P) fixed observations
     pi_eval: torch.Tensor,       # (n, N, 3) current prior samples
     radius: float,
     noise_std: float,
@@ -236,8 +242,14 @@ def log_em_step(
     channel: str = "so3",
     coord_noise_std: float = 0.0,
     so2_axis: str = "z",
+    n_tilts: int = 11,
+    tilt_step: float = 12.0,
+    tilt_axis: str = "y",
 ) -> None:
-    """4-row panel: GT cloud | y_obs | pi(k) sample | F(pi(k)) consistency check."""
+    """4-row panel: GT cloud | y_obs | pi(k) sample | F(pi(k)) consistency check.
+
+    For a CryoET tilt series (C = K channels) the central tilt is shown.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -247,12 +259,14 @@ def log_em_step(
         y_pi = forward_channel(
             pi_eval, radius=radius, noise_std=noise_std,
             image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
 
+    ch = y_eval.shape[1] // 2  # central tilt for a K-tilt series; 0 for one projection
     gt_np = gt_eval.cpu().numpy()
     pi_np = pi_eval.cpu().numpy()
-    yobs_np = y_eval[:, 0].cpu().numpy()
-    ypi_np = y_pi[:, 0].cpu().numpy()
+    yobs_np = y_eval[:, ch].cpu().numpy()
+    ypi_np = y_pi[:, ch].cpu().numpy()
     lim = max(1.6, extent * 0.8)
 
     fig = plt.figure(figsize=(2.6 * n, 10.4))
@@ -330,6 +344,9 @@ def pretrain_rotation_prior(
     channel: str = "so3",
     coord_noise_std: float = 0.0,
     so2_axis: str = "z",
+    n_tilts: int = 11,
+    tilt_step: float = 12.0,
+    tilt_axis: str = "y",
 ) -> torch.Tensor:
     """Warmstart pi(0): pre-train ``model`` to generate random rotations of the
     base object conditioned on F(x), then sample pi(0) on the real observations.
@@ -365,6 +382,7 @@ def pretrain_rotation_prior(
             y = forward_channel(
                 x1, radius=radius, noise_std=noise_std,
                 image_size=image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
             )                                                # fresh random pose in F
         z = torch.randn_like(x1)
 
@@ -430,6 +448,11 @@ def scsi_train(
     channel: str = "so3",
     coord_noise_std: float = 0.0,
     so2_axis: str = "z",
+    n_tilts: int = 11,
+    tilt_step: float = 12.0,
+    tilt_axis: str = "y",
+    dataset: str = "iid",
+    dataset_eps: float = 0.0,
 ) -> ConditionalPointCloudVelocity:
     torch.manual_seed(seed)
     configure_backends(device)
@@ -442,11 +465,20 @@ def scsi_train(
     print(f"[scsi] parameters: {n_params:,}")
 
     # Clean ground-truth clouds: used ONLY to make y_obs and for visualization.
-    gt = sample_fn(n_objects, cfg.n_points, device=device)           # (Nobj, N, 3)
+    if dataset == "template":
+        # Subtomogram-averaging dataset: N bounded perturbations of fixed template(s).
+        gt = sample_perturbed_dataset(
+            shapes, n_objects, cfg.n_points, dataset_eps, device=device
+        )                                                            # (Nobj, N, 3)
+        print(f"[scsi] dataset=template  eps={dataset_eps}  "
+              f"(perturbed copies of fixed {'/'.join(shapes)} template(s))")
+    else:
+        gt = sample_fn(n_objects, cfg.n_points, device=device)       # (Nobj, N, 3)
     with torch.no_grad():
         y_obs = forward_channel(
             gt, radius=radius, noise_std=noise_std,
             image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )                                                            # frozen observations
     gt, y_obs = gt.cpu(), y_obs.cpu()
     print(f"[scsi] y_obs {tuple(y_obs.shape)}  range=[{y_obs.min():.2f}, {y_obs.max():.2f}]")
@@ -468,6 +500,7 @@ def scsi_train(
         sample_steps=sample_steps, use_amp=use_amp,
         tracker=tracker, global_step=global_step,
         channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+        n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
     )
     x_pool = make_bootstrap(bootstrap, ctx)
     z_pool = None
@@ -488,6 +521,7 @@ def scsi_train(
             epochs=epochs_per_em, batch=batch, lr=lr,
             device=device, use_amp=use_amp,
             global_step=global_step, tracker=tracker, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
         save_checkpoint(str(ckpt_dir / f"model_em{k:04d}.pt"), model, cfg)
 
@@ -504,6 +538,7 @@ def scsi_train(
             em_step=k, tracker=tracker, out_dir=out_dir,
             global_step=global_step, viz_ball_radius=viz_ball_radius,
             shapes=shapes, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
 
     save_checkpoint(out, model, cfg)
@@ -536,6 +571,9 @@ def train_supervised(
     channel: str = "so3",
     coord_noise_std: float = 0.0,
     so2_axis: str = "z",
+    n_tilts: int = 11,
+    tilt_step: float = 12.0,
+    tilt_axis: str = "y",
 ) -> ConditionalPointCloudVelocity:
     """Supervised oracle: train b_t directly on the coupling (x, F(x)) with unlimited
     fresh ground truth. No EM, pool, or bootstrap -- the upper bound / sanity check
@@ -558,6 +596,7 @@ def train_supervised(
         y_eval = forward_channel(
             gt_eval, radius=radius, noise_std=noise_std,
             image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+            n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
         )
     gt_eval, y_eval = gt_eval.cpu(), y_eval.cpu()
 
@@ -579,6 +618,7 @@ def train_supervised(
             y = forward_channel(
                 x1, radius=radius, noise_std=noise_std,
                 image_size=cfg.image_size, extent=extent, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
             )                                                    # fresh random pose
         z = torch.randn_like(x1)
 
@@ -620,6 +660,7 @@ def train_supervised(
                 em_step=step, tracker=tracker, out_dir=out_dir,
                 global_step=global_step, viz_ball_radius=viz_ball_radius,
                 tag="supervised", shapes=shapes, channel=channel, so2_axis=so2_axis, coord_noise_std=coord_noise_std,
+                n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis,
             )
             save_checkpoint(str(ckpt_dir / f"model_sup{step:06d}.pt"), model, cfg)
             model.train()
