@@ -36,22 +36,14 @@ _R_tilt_cache: dict[tuple, torch.Tensor] = {}
 def random_rotations(n: int, device: torch.device | str = "cpu") -> torch.Tensor:
     """``n`` Haar-uniform SO(3) rotation matrices, shape (n, 3, 3).
 
-    On CUDA, generates natively on the device (avoids CPU↔GPU transfer).
-    On CPU/MPS, scipy is faster for the batch sizes used in training.
+    Uses scipy for all device types.  A GPU-native path via unit quaternions
+    was benchmarked but avoided: on MPS it is slower (GPU kernel overhead
+    dominates for the small batch sizes used in training), and on CUDA it
+    consumes from PyTorch's CUDA RNG, silently shifting the random sequence
+    for every subsequent torch.rand/randn call in the training step.
     """
-    dev = torch.device(device) if isinstance(device, str) else device
-    if dev.type == "cuda":
-        # GPU-native via unit quaternions -- no CPU round-trip.
-        q = torch.randn(n, 4, device=dev)
-        q = q / q.norm(dim=1, keepdim=True)
-        w, x, y, z = q.unbind(1)
-        return torch.stack([
-            1 - 2 * (y * y + z * z),   2 * (x * y - z * w),   2 * (x * z + y * w),
-                2 * (x * y + z * w), 1 - 2 * (x * x + z * z),   2 * (y * z - x * w),
-                2 * (x * z - y * w),   2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
-        ], dim=1).reshape(n, 3, 3)
     mats = Rotation.random(n).as_matrix().astype(np.float32)
-    return torch.from_numpy(mats).to(dev)
+    return torch.from_numpy(mats).to(device)
 
 
 def rotate_clouds(points: torch.Tensor, R: torch.Tensor) -> torch.Tensor:

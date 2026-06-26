@@ -65,9 +65,8 @@ def transport_sample(
     dt = 1.0 / n_steps
     # Encode observation once; fall back to passing y if the model predates this API.
     ctx = model.encode_obs(y) if hasattr(model, "encode_obs") else None
-    ts = torch.arange(n_steps, device=z0.device, dtype=z0.dtype) * dt  # pre-alloc timestamps
     for k in range(n_steps):
-        t = ts[k].expand(B)
+        t = torch.full((B,), k * dt, device=z0.device, dtype=z0.dtype)
         if ctx is not None:
             x = x + model(x, t, ctx=ctx) * dt
         else:
