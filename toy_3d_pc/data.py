@@ -1,10 +1,10 @@
-"""Toy data distributions: point clouds sampled from primitive surfaces.
+"""Toy data distributions: point clouds sampled uniformly from primitive volumes.
 
 Each sampler returns a *batch of clouds*; every cloud is a fresh random sample of
-points on the same surface, so the model learns the distribution "points on a
-<shape>". :func:`make_mixture_sampler` draws each object's shape uniformly from a
-chosen subset; :func:`sample_perturbed_dataset` is the cryo-ET / subtomogram view
-(many noisy copies of fixed template(s)). Swap any sampler for a ShapeNet / .npy
+points inside the same solid volume, so the model learns the distribution "points
+inside a <shape>". :func:`make_mixture_sampler` draws each object's shape uniformly
+from a chosen subset; :func:`sample_perturbed_dataset` is the cryo-ET / subtomogram
+view (many noisy copies of fixed template(s)). Swap any sampler for a ShapeNet / .npy
 loader and nothing else changes -- clouds live in world coordinates (~[-1.6, 1.6]),
 *not* normalized to [-1, 1].
 """
@@ -23,13 +23,28 @@ def sample_torus(
     r: float = 0.4,   # minor radius (tube radius)
     device: torch.device | str = "cpu",
 ) -> torch.Tensor:
-    """Return (batch, n_points, 3) point clouds on a torus."""
-    theta = torch.rand(batch, n_points, device=device) * 2 * math.pi  # around the ring
-    phi = torch.rand(batch, n_points, device=device) * 2 * math.pi    # around the tube
-    x = (R + r * torch.cos(phi)) * torch.cos(theta)
-    y = (R + r * torch.cos(phi)) * torch.sin(theta)
-    z = r * torch.sin(phi)
-    return torch.stack([x, y, z], dim=-1)
+    """Return (batch, n_points, 3) point clouds uniform in the solid torus volume.
+
+    Uses rejection sampling inside the bounding annular cylinder.  Acceptance rate
+    = π/4 ≈ 78.5%; 3× oversampling makes shortfall probability negligible.
+    """
+    n_sample = n_points * 3
+    # Sample rho uniform in annular disk (density ∝ rho via inverse-CDF trick)
+    u = torch.rand(batch, n_sample, device=device)
+    rho = torch.sqrt(4.0 * R * r * u + (R - r) ** 2)
+    theta = torch.rand(batch, n_sample, device=device) * 2 * math.pi
+    z = (torch.rand(batch, n_sample, device=device) - 0.5) * 2.0 * r
+    accept = (rho - R).pow(2) + z.pow(2) <= r ** 2   # inside the tube cross-section
+
+    x = rho * torch.cos(theta)
+    y = rho * torch.sin(theta)
+    clouds_full = torch.stack([x, y, z], dim=-1)   # (batch, n_sample, 3)
+
+    out = torch.empty(batch, n_points, 3, device=device)
+    for b in range(batch):
+        idx = accept[b].nonzero(as_tuple=True)[0]
+        out[b] = clouds_full[b, idx[:n_points]]
+    return out
 
 
 def sample_cylinder(
@@ -39,26 +54,12 @@ def sample_cylinder(
     height: float = 1.4,
     device: torch.device | str = "cpu",
 ) -> torch.Tensor:
-    """Return (batch, n_points, 3) clouds on a closed cylinder (axis z, centered)."""
-    h = height / 2.0
-    side_area = 2.0 * math.pi * radius * height
-    cap_area = math.pi * radius * radius
-    p_side = side_area / (side_area + 2.0 * cap_area)
-    on_side = torch.rand(batch, n_points, device=device) < p_side
-
+    """Return (batch, n_points, 3) clouds uniform in the solid cylinder volume (axis z, centered)."""
+    r_sample = torch.sqrt(torch.rand(batch, n_points, device=device)) * radius
     theta = torch.rand(batch, n_points, device=device) * 2 * math.pi
-    z_side = (torch.rand(batch, n_points, device=device) - 0.5) * height
-    x_side, y_side = radius * torch.cos(theta), radius * torch.sin(theta)
-
-    rr = torch.sqrt(torch.rand(batch, n_points, device=device)) * radius
-    cap_theta = torch.rand(batch, n_points, device=device) * 2 * math.pi
-    x_cap, y_cap = rr * torch.cos(cap_theta), rr * torch.sin(cap_theta)
-    top = torch.rand(batch, n_points, device=device) < 0.5
-    z_cap = torch.where(top, torch.full_like(rr, h), torch.full_like(rr, -h))
-
-    x = torch.where(on_side, x_side, x_cap)
-    y = torch.where(on_side, y_side, y_cap)
-    z = torch.where(on_side, z_side, z_cap)
+    z = (torch.rand(batch, n_points, device=device) - 0.5) * height
+    x = r_sample * torch.cos(theta)
+    y = r_sample * torch.sin(theta)
     return torch.stack([x, y, z], dim=-1)
 
 
@@ -161,12 +162,13 @@ def sample_perturbed_dataset(
     return out
 
 
-def mixture_surface_residual(clouds: torch.Tensor, names: list[str]) -> torch.Tensor:
-    """Mean squared distance from each point to its *nearest* target surface.
+def mixture_volume_residual(clouds: torch.Tensor, names: list[str]) -> torch.Tensor:
+    """Mean squared exterior distance from each point to its nearest target volume.
 
-    0 means every point lies on one of the ``names`` surfaces. For a mixture each
-    point is scored against whichever surface it is closest to.
+    0 means every point lies inside one of the ``names`` volumes.  Interior points
+    (negative signed distance) score 0; exterior points are penalised by the squared
+    distance to the nearest volume boundary.
     """
     _check_shapes(names)
     sds = torch.stack([_SHAPE_SD[n](clouds) for n in names], dim=0)   # (S, B, N)
-    return sds.pow(2).amin(dim=0).mean()
+    return sds.amin(dim=0).clamp(min=0).pow(2).mean()

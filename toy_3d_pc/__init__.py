@@ -17,7 +17,7 @@ from .corruption import (
 from .data import (
     available_shapes,
     make_mixture_sampler,
-    mixture_surface_residual,
+    mixture_volume_residual,
     sample_cylinder,
     sample_perturbed_dataset,
     sample_torus,
@@ -55,7 +55,7 @@ __all__ = [
     "sample_cylinder",
     "make_mixture_sampler",
     "sample_perturbed_dataset",
-    "mixture_surface_residual",
+    "mixture_volume_residual",
     "available_shapes",
     # device
     "available_device",

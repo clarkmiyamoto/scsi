@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 
 from .corruption import forward_channel, pseudo_inverse
-from .data import make_mixture_sampler, mixture_surface_residual, sample_perturbed_dataset
+from .data import make_mixture_sampler, mixture_volume_residual, sample_perturbed_dataset
 from .device import autocast, configure_backends, describe, needs_grad_scaler, synchronize
 from .model import (
     ConditionalModelConfig,
@@ -135,8 +135,8 @@ def log_em_step(
     path = out_dir / f"{slug}_{em_step:04d}.png"
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)
-    resid = mixture_surface_residual(pi_eval, shapes or ["torus"]).item()
-    print(f"  [eval] wrote {path}  pi surface_residual={resid:.4f} (0 = on a target surface)")
+    resid = mixture_volume_residual(pi_eval, shapes or ["torus"]).item()
+    print(f"  [eval] wrote {path}  pi volume_residual={resid:.4f} (0 = all points inside target volume)")
 
     # All-tilts observation panel: n rows (objects) × K columns (tilt images).
     K_tilts = y_eval.shape[1]
@@ -171,7 +171,7 @@ def log_em_step(
                     save_balls_obj(pi_np[j], p, radius, 1)
                     paths.append(p)
                 tracker.log_meshes("eval/pi_balls", paths, step=global_step[0])
-        tracker.log({"eval/surface_residual": resid}, step=global_step[0])
+        tracker.log({"eval/volume_residual": resid}, step=global_step[0])
 
 
 def log_bootstrap(
@@ -214,13 +214,13 @@ def log_bootstrap(
     path = out_dir / "bootstrap_pi0.png"
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)
-    resid = mixture_surface_residual(pi0, shapes or ["torus"]).item()
-    print(f"  [bootstrap] wrote {path}  pi(0) surface_residual={resid:.4f}")
+    resid = mixture_volume_residual(pi0, shapes or ["torus"]).item()
+    print(f"  [bootstrap] wrote {path}  pi(0) volume_residual={resid:.4f}")
 
     if tracker is not None and tracker.enabled:
         tracker.log_image("bootstrap/pi0_panel", str(path), step=global_step[0])
         tracker.log_clouds("bootstrap/pi0", pi0, step=global_step[0])
-        tracker.log({"bootstrap/surface_residual": resid}, step=global_step[0])
+        tracker.log({"bootstrap/volume_residual": resid}, step=global_step[0])
 
 
 # ── EM driver ─────────────────────────────────────────────────────────────────
