@@ -80,7 +80,6 @@ def log_em_step(
     tracker,
     out_dir: Path,
     global_step: list,
-    viz_ball_radius: float,
     tag: str = "EM step",
     shapes: list[str] | None = None,
     coord_noise_std: float = 0.0,
@@ -143,14 +142,14 @@ def log_em_step(
         tracker.log_image("eval/panel", str(path), step=global_step[0])
         tracker.log_clouds("eval/gt", gt_eval, step=global_step[0])
         tracker.log_clouds("eval/pi", pi_eval, step=global_step[0])
-        if viz_ball_radius > 0:
+        if radius > 0:
             from .balls import save_balls_obj
 
             with tempfile.TemporaryDirectory(prefix="pcscsi_balls_") as tmp:
                 paths = []
                 for j in range(n):
                     p = os.path.join(tmp, f"pi_{em_step:04d}_{j}.obj")
-                    save_balls_obj(pi_np[j], p, viz_ball_radius, 1)
+                    save_balls_obj(pi_np[j], p, radius, 1)
                     paths.append(p)
                 tracker.log_meshes("eval/pi_balls", paths, step=global_step[0])
         tracker.log({"eval/surface_residual": resid}, step=global_step[0])
@@ -161,7 +160,6 @@ def log_bootstrap(
     tracker,
     out_dir: Path,
     global_step: list,
-    viz_ball_radius: float,
     gt: torch.Tensor | None = None,
     shapes: list[str] | None = None,
 ) -> None:
@@ -234,7 +232,6 @@ def scsi_train(
     tracker=None,
     out: str = "toy_3d_pc_checkpoint.pt",
     eval_dir: str = "toy_3d_pc_eval",
-    viz_ball_radius: float = 0.05,
     coord_noise_std: float = 0.0,
     n_tilts: int = 11,
     tilt_step: float = 12.0,
@@ -286,7 +283,7 @@ def scsi_train(
         extent=extent, vol_size=tomo_vol, carve_quantile=tomo_quantile, seed=seed,
     )
     print(f"[scsi] F-dagger bootstrap  pi(0) {tuple(x_boot.shape)}")
-    log_bootstrap(x_boot[:n_eval], tracker, out_dir, global_step, viz_ball_radius,
+    log_bootstrap(x_boot[:n_eval], tracker, out_dir, global_step,
                   gt=gt_eval, shapes=shapes)
 
     # Phase 2b: warm-start the drift Theta^(0)  (Algorithm 1).
@@ -378,7 +375,7 @@ def scsi_train(
             gt_eval, y_eval, pi_eval,
             radius=radius, noise_std=noise_std, image_size=cfg.image_size, extent=extent,
             em_step=k, tracker=tracker, out_dir=out_dir, global_step=global_step,
-            viz_ball_radius=viz_ball_radius, shapes=shapes, coord_noise_std=coord_noise_std,
+            shapes=shapes, coord_noise_std=coord_noise_std,
             n_tilts=n_tilts, tilt_step=tilt_step, tilt_axis=tilt_axis, splat=splat,
         )
 

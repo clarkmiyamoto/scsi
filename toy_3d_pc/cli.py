@@ -48,16 +48,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="F-dagger space-carving quantile over tilts (0=strict min, 0.5=median)")
 
     # SCSI loop.
-    pe.add_argument("--n-objects", type=int, default=128, help="number of observations (|mu|)")
-    pe.add_argument("--em-steps", type=int, default=30, help="outer EM iterations K")
+    pe.add_argument("--n-objects", type=int, default=2048, help="number of observations (|mu|)")
+    pe.add_argument("--em-steps", type=int, default=100, help="outer EM iterations K")
     pe.add_argument("--training-steps", type=int, default=200,
                     help="inner SGD training steps per EM iteration (T_tr)")
-    pe.add_argument("--batch", type=int, default=32)
+    pe.add_argument("--batch", type=int, default=128)
     pe.add_argument("--lr", type=float, default=2e-4)
-    pe.add_argument("--sample-steps", type=int, default=50, help="Euler steps in the transport ODE")
-    pe.add_argument("--alpha-z", type=float, default=0.0, help="noise-coupling prob (z = z')")
-    pe.add_argument("--alpha-y", type=float, default=0.0, help="obs-coupling prob (y-hat = y)")
-    pe.add_argument("--ema-decay", type=float, default=0.999,
+    pe.add_argument("--sample-steps", type=int, default=64, help="Euler steps in the transport ODE")
+    pe.add_argument("--alpha-z", type=float, default=0.05, help="noise-coupling prob (z = z')")
+    pe.add_argument("--alpha-y", type=float, default=0.05, help="obs-coupling prob (y-hat = y)")
+    pe.add_argument("--ema-decay", type=float, default=0.995,
                     help="gamma: EMA decay over the outer EM loop")
     pe.add_argument("--pretrain-steps", type=int, default=2000, help="warm-start SGD steps")
     pe.add_argument("--interpolant-style", choices=["linear", "gvp"], default="linear")
@@ -69,11 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="iid = fresh shape samples; template = perturbed copies of a fixed template")
     pe.add_argument("--dataset-eps", type=float, default=0.0,
                     help="[--dataset template] max per-point perturbation (||delta|| <= eps)")
-    pe.add_argument("--n-eval", type=int, default=4, help="objects shown in eval panels")
+    pe.add_argument("--n-eval", type=int, default=3, help="objects shown in eval panels")
     pe.add_argument("--seed", type=int, default=0)
     pe.add_argument("--out", default="toy_3d_pc_checkpoint.pt", help="final checkpoint path")
     pe.add_argument("--eval-dir", default="toy_3d_pc_eval", help="where eval PNGs are written")
-    pe.add_argument("--viz-ball-radius", type=float, default=0.05, help="ball radius for W&B meshes (0=off)")
 
     # Supervised oracle.
     pe.add_argument("--supervised", action="store_true",
@@ -124,7 +123,7 @@ def main(argv: list[str] | None = None) -> None:
                 sample_steps=args.sample_steps, n_eval=args.n_eval, eval_every=args.eval_every,
                 use_amp=not args.no_amp, seed=args.seed, style=args.interpolant_style,
                 shapes=args.shape, tracker=tracker, out=args.out, eval_dir=args.eval_dir,
-                viz_ball_radius=args.viz_ball_radius, coord_noise_std=args.coord_noise_std,
+                coord_noise_std=args.coord_noise_std,
                 n_tilts=args.n_tilts, tilt_step=args.tilt_step, tilt_axis=args.tilt_axis,
                 splat=args.splat,
             )
@@ -140,7 +139,7 @@ def main(argv: list[str] | None = None) -> None:
                 ema_decay=args.ema_decay, pretrain_steps=args.pretrain_steps,
                 style=args.interpolant_style, shapes=args.shape, n_eval=args.n_eval,
                 use_amp=not args.no_amp, seed=args.seed, tracker=tracker, out=args.out,
-                eval_dir=args.eval_dir, viz_ball_radius=args.viz_ball_radius,
+                eval_dir=args.eval_dir,
                 coord_noise_std=args.coord_noise_std, n_tilts=args.n_tilts,
                 tilt_step=args.tilt_step, tilt_axis=args.tilt_axis, splat=args.splat,
                 tomo_vol=args.tomo_vol, tomo_quantile=args.tomo_quantile,

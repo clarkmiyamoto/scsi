@@ -40,7 +40,6 @@ def train_supervised(
     tracker=None,
     out: str = "toy_3d_pc_checkpoint.pt",
     eval_dir: str = "toy_3d_pc_eval",
-    viz_ball_radius: float = 0.05,
     coord_noise_std: float = 0.0,
     n_tilts: int = 11,
     tilt_step: float = 12.0,
@@ -118,7 +117,7 @@ def train_supervised(
                 gt_eval, y_eval, pi,
                 radius=radius, noise_std=noise_std, image_size=cfg.image_size, extent=extent,
                 em_step=step, tracker=tracker, out_dir=out_dir, global_step=global_step,
-                viz_ball_radius=viz_ball_radius, tag="supervised", shapes=shapes,
+                tag="supervised", shapes=shapes,
                 coord_noise_std=coord_noise_std, n_tilts=n_tilts, tilt_step=tilt_step,
                 tilt_axis=tilt_axis, splat=splat,
             )
