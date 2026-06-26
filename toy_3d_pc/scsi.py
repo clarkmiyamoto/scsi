@@ -138,8 +138,27 @@ def log_em_step(
     resid = mixture_surface_residual(pi_eval, shapes or ["torus"]).item()
     print(f"  [eval] wrote {path}  pi surface_residual={resid:.4f} (0 = on a target surface)")
 
+    # All-tilts observation panel: n rows (objects) × K columns (tilt images).
+    K_tilts = y_eval.shape[1]
+    y_all_np = y_eval.cpu().numpy()          # (n, K, P, P)
+    fig2, axes2 = plt.subplots(n, K_tilts, figsize=(1.8 * K_tilts, 1.8 * n), squeeze=False)
+    for j in range(n):
+        for ki in range(K_tilts):
+            ax = axes2[j, ki]
+            ax.imshow(y_all_np[j, ki], cmap="gray")
+            ax.axis("off")
+            if j == 0:
+                ax.set_title(f"tilt {ki}", fontsize=7)
+        axes2[j, 0].set_ylabel(f"pi({em_step})[{j}]", fontsize=7)
+    fig2.suptitle(f"y obs (all tilts) — pi({em_step})", fontsize=11)
+    fig2.tight_layout()
+    path2 = out_dir / f"y_obs_{em_step:04d}.png"
+    fig2.savefig(path2, dpi=100, bbox_inches="tight")
+    plt.close(fig2)
+
     if tracker is not None and tracker.enabled:
         tracker.log_image("eval/panel", str(path), step=global_step[0])
+        tracker.log_image("eval/y_obs", str(path2), step=global_step[0])
         tracker.log_clouds("eval/gt", gt_eval, step=global_step[0])
         tracker.log_clouds("eval/pi", pi_eval, step=global_step[0])
         if radius > 0:

@@ -104,12 +104,31 @@ class ConditionalPointCloudVelocity(nn.Module):
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        # x: (B, N, 3), t: (B,), y: (B, C, P, P)
+    def encode_obs(self, y: torch.Tensor) -> torch.Tensor:
+        """Encode observation y (B, C, P, P) -> ctx tokens (B, n_patches, dim).
+
+        Pre-call this once when y is fixed across multiple forward() calls (e.g.
+        the ODE loop in transport_sample) and pass the result as ctx= to save
+        repeated Conv2d + positional-embedding work.
+        """
+        return self.img_encoder(y)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        y: torch.Tensor | None = None,
+        *,
+        ctx: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # x: (B, N, 3), t: (B,), y: (B, C, P, P) OR pre-encoded ctx: (B, M, dim)
+        if ctx is None:
+            if y is None:
+                raise ValueError("either y or ctx must be provided")
+            ctx = self.img_encoder(y)                          # (B, n_patches, dim)
         h = self.in_proj(x)
         temb = self.t_proj(timestep_embedding(t, self.dim))
         h = h + temb[:, None, :]                               # add time to every point
-        ctx = self.img_encoder(y)                              # (B, n_patches, dim)
         for blk in self.blocks:
             h = blk(h, ctx)
         return self.out_proj(self.out_norm(h))                 # (B, N, 3)

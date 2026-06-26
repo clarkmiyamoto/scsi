@@ -56,11 +56,20 @@ def transport_sample(
 
     This is ``Phi(z' | y)``. The network uses only LayerNorm (mode-independent), so no
     train/eval toggle is needed for correctness. Runs under ``no_grad``.
+
+    ``y`` is fixed across all ODE steps, so we encode it once and pass the cached
+    context tokens on every step instead of re-running the image encoder 64 times.
     """
     x = z0
     B = z0.size(0)
     dt = 1.0 / n_steps
+    # Encode observation once; fall back to passing y if the model predates this API.
+    ctx = model.encode_obs(y) if hasattr(model, "encode_obs") else None
+    ts = torch.arange(n_steps, device=z0.device, dtype=z0.dtype) * dt  # pre-alloc timestamps
     for k in range(n_steps):
-        t = torch.full((B,), k * dt, device=z0.device)
-        x = x + model(x, t, y) * dt
+        t = ts[k].expand(B)
+        if ctx is not None:
+            x = x + model(x, t, ctx=ctx) * dt
+        else:
+            x = x + model(x, t, y) * dt
     return x

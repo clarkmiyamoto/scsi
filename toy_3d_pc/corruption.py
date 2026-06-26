@@ -24,14 +24,34 @@ import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation
 
+# Module-level cache for the (fixed) tilt-series rotation matrices, keyed by
+# (n_tilts, tilt_step_deg, axis, device_str).  Avoids repeated scipy + numpy
+# round-trips inside the training hot-loop.
+_R_tilt_cache: dict[tuple, torch.Tensor] = {}
+
 
 # ── Rotations ─────────────────────────────────────────────────────────────────
 
 
 def random_rotations(n: int, device: torch.device | str = "cpu") -> torch.Tensor:
-    """``n`` Haar-uniform SO(3) rotation matrices, shape (n, 3, 3)."""
+    """``n`` Haar-uniform SO(3) rotation matrices, shape (n, 3, 3).
+
+    On CUDA, generates natively on the device (avoids CPU↔GPU transfer).
+    On CPU/MPS, scipy is faster for the batch sizes used in training.
+    """
+    dev = torch.device(device) if isinstance(device, str) else device
+    if dev.type == "cuda":
+        # GPU-native via unit quaternions -- no CPU round-trip.
+        q = torch.randn(n, 4, device=dev)
+        q = q / q.norm(dim=1, keepdim=True)
+        w, x, y, z = q.unbind(1)
+        return torch.stack([
+            1 - 2 * (y * y + z * z),   2 * (x * y - z * w),   2 * (x * z + y * w),
+                2 * (x * y + z * w), 1 - 2 * (x * x + z * z),   2 * (y * z - x * w),
+                2 * (x * z - y * w),   2 * (y * z + x * w), 1 - 2 * (x * x + y * y),
+        ], dim=1).reshape(n, 3, 3)
     mats = Rotation.random(n).as_matrix().astype(np.float32)
-    return torch.from_numpy(mats).to(device)
+    return torch.from_numpy(mats).to(dev)
 
 
 def rotate_clouds(points: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
@@ -151,8 +171,11 @@ def forward_channel(
     R_global = random_rotations(B, device) if R is None else R
     x_glob = rotate_clouds(points, R_global)                       # (B, N, 3)
 
-    # K known tilts: x_rot[b,k,n] = R_tilt[k] @ x_glob[b,n].
-    R_tilt = tilt_rotations(n_tilts, tilt_step, tilt_axis, device)  # (K, 3, 3)
+    # K known tilts: cached per (n_tilts, tilt_step, axis, device).
+    cache_key = (n_tilts, tilt_step, tilt_axis, str(device))
+    if cache_key not in _R_tilt_cache:
+        _R_tilt_cache[cache_key] = tilt_rotations(n_tilts, tilt_step, tilt_axis, device)
+    R_tilt = _R_tilt_cache[cache_key]
     x_rot = torch.einsum("bnd,ked->bkne", x_glob, R_tilt)         # (B, K, N, 3)
     img = _splat(x_rot[..., 0], x_rot[..., 1], image_size, extent, radius, kind=splat)  # (B,K,P,P)
 
