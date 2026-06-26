@@ -57,10 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--sample-steps", type=int, default=64, help="Euler steps in the transport ODE")
     pe.add_argument("--alpha-z", type=float, default=0.05, help="noise-coupling prob (z = z')")
     pe.add_argument("--alpha-y", type=float, default=0.05, help="obs-coupling prob (y-hat = y)")
-    pe.add_argument("--ema-decay", type=float, default=0.995,
+    pe.add_argument("--ema-decay", type=float, default=0.999,
                     help="gamma: EMA decay over the outer EM loop")
     pe.add_argument("--pretrain-steps", type=int, default=2000, help="warm-start SGD steps")
-    pe.add_argument("--interpolant-style", choices=["linear", "gvp"], default="linear")
+    pe.add_argument("--interpolant-style", choices=["linear", "gvp"], default="gvp")
 
     # Data / eval.
     pe.add_argument("--shape", nargs="+", choices=available_shapes(), default=["torus"],
@@ -69,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="iid = fresh shape samples; template = perturbed copies of a fixed template")
     pe.add_argument("--dataset-eps", type=float, default=0.0,
                     help="[--dataset template] max per-point perturbation (||delta|| <= eps)")
-    pe.add_argument("--n-eval", type=int, default=3, help="objects shown in eval panels")
+    pe.add_argument("--n-eval", type=int, default=6, help="objects shown in eval panels")
     pe.add_argument("--seed", type=int, default=0)
     pe.add_argument("--out", default="toy_3d_pc_checkpoint.pt", help="final checkpoint path")
     pe.add_argument("--eval-dir", default="toy_3d_pc_eval", help="where eval PNGs are written")
