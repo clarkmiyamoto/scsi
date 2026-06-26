@@ -40,8 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--coord-noise-std", type=float, default=0.0,
                     help="W: AWGN std on 3D point coords before rotation")
     pe.add_argument("--extent", type=float, default=2.0, help="world half-extent mapped to the image")
-    pe.add_argument("--n-tilts", type=int, default=11, help="number of projections K in the tilt series")
-    pe.add_argument("--tilt-step", type=float, default=12.0, help="degrees between consecutive tilts")
+    pe.add_argument("--n-tilts", type=int, default=32, help="number of projections K in the tilt series")
+    pe.add_argument("--tilt-step", type=float, default=5.0, help="degrees between consecutive tilts")
     pe.add_argument("--tilt-axis", choices=["x", "y"], default="y", help="tilt axis (out-of-plane)")
     pe.add_argument("--tomo-vol", type=int, default=48, help="F-dagger back-projection grid (vol^3)")
     pe.add_argument("--tomo-quantile", type=float, default=0.15,
