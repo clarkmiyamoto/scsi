@@ -56,6 +56,42 @@ def load_checkpoint(path: str, device: torch.device):
     return model, cfg
 
 
+def save_train_state(
+    path: str,
+    model: nn.Module,
+    model_ema: nn.Module,
+    opt: torch.optim.Optimizer,
+    em_step: int,
+    global_step: int,
+    cfg: ConditionalModelConfig,
+) -> None:
+    """Save full training state (model, EMA, optimizer, loop counters) for resume."""
+    torch.save({
+        "model": model.state_dict(),
+        "model_ema": model_ema.state_dict(),
+        "optimizer": opt.state_dict(),
+        "em_step": em_step,
+        "global_step": global_step,
+        "cfg": asdict(cfg),
+    }, path)
+
+
+def load_train_state(path: str, device: torch.device):
+    """Load training state saved by :func:`save_train_state`.
+
+    Returns ``(model, model_ema, opt_state_dict, em_step, global_step, cfg)``.
+    The caller must build the optimizer, call ``opt.load_state_dict(opt_state_dict)``,
+    and resume the EM loop from ``em_step + 1``.
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=True)
+    cfg = ConditionalModelConfig(**ckpt["cfg"])
+    model = build_conditional_model(cfg, device)
+    model.load_state_dict(ckpt["model"])
+    model_ema = build_conditional_model(cfg, device)
+    model_ema.load_state_dict(ckpt["model_ema"])
+    return model, model_ema, ckpt["optimizer"], ckpt["em_step"], ckpt["global_step"], cfg
+
+
 # ── Visualization ───────────────────────────────────────────────────────────────
 
 
@@ -260,14 +296,29 @@ def scsi_train(
     tomo_quantile: float = 0.15,
     dataset: str = "iid",
     dataset_eps: float = 0.0,
+    resume_from: str | None = None,
+    integrator: str = "euler",
+    eps_start: float = 0.0,
+    eps_final: float = 0.0,
 ) -> nn.Module:
     torch.manual_seed(seed)
     configure_backends(device)
     shapes = shapes or ["torus"]
     sample_fn = make_mixture_sampler(shapes)
     print(f"[scsi] device={describe(device)}  amp={use_amp}  shapes={shapes}  splat={splat}")
+    print(f"[scsi] integrator={integrator}  eps_start={eps_start}  eps_final={eps_final}")
 
-    model = build_conditional_model(cfg, device)
+    if resume_from is not None:
+        print(f"[scsi] resuming from {resume_from}")
+        model, model_ema, opt_state, start_em, _gs, cfg = load_train_state(resume_from, device)
+        global_step = [_gs]
+        print(f"[scsi] resumed at em_step={start_em}  global_step={_gs}")
+    else:
+        model = build_conditional_model(cfg, device)
+        model_ema = None
+        opt_state = None
+        start_em = 0
+        global_step = [0]
     n_params = sum(p.numel() for p in model.parameters())
     print(f"[scsi] parameters: {n_params:,}")
 
@@ -291,44 +342,50 @@ def scsi_train(
     out_dir = Path(eval_dir)
     ckpt_dir = Path("toy_3d_pc_checkpoints")
     ckpt_dir.mkdir(exist_ok=True)
-    global_step = [0]
 
     n_eval = min(n_eval, n_objects)
     gt_eval, y_eval = gt[:n_eval], y_obs[:n_eval]
 
-    # Phase 2a: pseudo-inverse bootstrap  x_boot = F-dagger(y_obs).
-    x_boot = pseudo_inverse(
-        y_obs, cfg.n_points, tilt_step, tilt_axis,
-        extent=extent, vol_size=tomo_vol, carve_quantile=tomo_quantile, seed=seed,
-    )
-    print(f"[scsi] F-dagger bootstrap  pi(0) {tuple(x_boot.shape)}")
-    log_bootstrap(x_boot[:n_eval], tracker, out_dir, global_step,
-                  gt=gt_eval, shapes=shapes)
-
-    # Phase 2b: warm-start the drift Theta^(0)  (Algorithm 1).
-    if pretrain_steps > 0:
-        print(f"[scsi] warm-start: {pretrain_steps} steps on g . F-dagger(y)")
-        find_initialization(
-            model, y_obs, x_boot, style=style, pretrain_steps=pretrain_steps,
-            batch=batch, lr=lr, device=device, use_amp=use_amp,
-            tracker=tracker, global_step=global_step,
+    if resume_from is None:
+        # Phase 2a: pseudo-inverse bootstrap  x_boot = F-dagger(y_obs).
+        x_boot = pseudo_inverse(
+            y_obs, cfg.n_points, tilt_step, tilt_axis,
+            extent=extent, vol_size=tomo_vol, carve_quantile=tomo_quantile, seed=seed,
         )
-        save_checkpoint(str(ckpt_dir / "model_warmstart.pt"), model, cfg)
+        print(f"[scsi] F-dagger bootstrap  pi(0) {tuple(x_boot.shape)}")
+        log_bootstrap(x_boot[:n_eval], tracker, out_dir, global_step,
+                      gt=gt_eval, shapes=shapes)
 
-    # EMA init: Theta_EMA^(0) <- Theta^(0).
-    model_ema = clone_ema(model)
-    print(f"[scsi] EMA sampler enabled  gamma={ema_decay}")
+        # Phase 2b: warm-start the drift Theta^(0)  (Algorithm 1).
+        if pretrain_steps > 0:
+            print(f"[scsi] warm-start: {pretrain_steps} steps on g . F-dagger(y)")
+            find_initialization(
+                model, y_obs, x_boot, style=style, pretrain_steps=pretrain_steps,
+                batch=batch, lr=lr, device=device, use_amp=use_amp,
+                tracker=tracker, global_step=global_step,
+            )
+            save_checkpoint(str(ckpt_dir / "model_warmstart.pt"), model, cfg)
+
+        # EMA init: Theta_EMA^(0) <- Theta^(0).
+        model_ema = clone_ema(model)
+        print(f"[scsi] EMA sampler enabled  gamma={ema_decay}")
+    else:
+        print(f"[scsi] skipping bootstrap + warm-start (resumed)  gamma={ema_decay}")
 
     # Persistent optimizer for the inner SGD steps across all outer iterations.
     opt = torch.optim.AdamW(
         model.parameters(), lr=lr, weight_decay=1e-4, fused=(device.type == "cuda")
     )
+    if opt_state is not None:
+        opt.load_state_dict(opt_state)
     use_scaler = needs_grad_scaler(device, use_amp)
     scaler = torch.amp.GradScaler(enabled=use_scaler)
     Nobj = y_obs.size(0)
 
+    ode_kwargs = dict(n_steps=sample_steps, integrator=integrator, eps_start=eps_start, eps_final=eps_final)
+
     # Phase 3: literal self-consistent EM loop (Algorithm 2).
-    for k in range(1, em_steps + 1):
+    for k in range(start_em + 1, em_steps + 1):
         print("=" * 60)
         print(f"EM iteration {k} / {em_steps}")
         print("=" * 60)
@@ -340,7 +397,7 @@ def scsi_train(
 
             # x-hat = Phi_EMA^(k-1)(z' | y): on-the-fly transport with the FROZEN EMA map.
             z_prime = torch.randn(batch, cfg.n_points, 3, device=device)
-            x_hat = transport_sample(model_ema, z_prime, y, n_steps=sample_steps)
+            x_hat = transport_sample(model_ema, z_prime, y, **ode_kwargs)
 
             # alpha_z noise coupling: z = z' w.p. alpha_z, else fresh N(0, I).
             mask_z = (torch.rand(batch, 1, 1, device=device) < alpha_z)
@@ -380,15 +437,15 @@ def scsi_train(
 
         # Theta^(k) <- Theta ; EMA over the outer loop.
         ema_update_outer(model_ema, model, ema_decay)
-        save_checkpoint(str(ckpt_dir / f"model_em{k:04d}.pt"), model, cfg)
-        save_checkpoint(str(ckpt_dir / f"model_em{k:04d}_ema.pt"), model_ema, cfg)
+        save_train_state(
+            str(ckpt_dir / f"model_em{k:04d}.pt"),
+            model, model_ema, opt, k, global_step[0], cfg,
+        )
 
         # Eval: sample pi(k) with the EMA transport map and log.
         with torch.no_grad():
             z_eval = torch.randn(n_eval, cfg.n_points, 3, device=device)
-            pi_eval = transport_sample(
-                model_ema, z_eval, y_eval.to(device), n_steps=sample_steps
-            ).cpu()
+            pi_eval = transport_sample(model_ema, z_eval, y_eval.to(device), **ode_kwargs).cpu()
         synchronize(device)
         log_em_step(
             gt_eval, y_eval, pi_eval,

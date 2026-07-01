@@ -3,24 +3,28 @@
 ## Jun 26 — Initial Sweep (Groups A–F)
 
 **Setup**
+
 - CryoET w/ 32 tilts (observations) + 5deg per tilt.
 - Clean distribution $\pi = \delta_x$ where $x$ is a solid torus.
-    - To approximate the torus with a point cloud, uniformly sample the volume of the object with $N$ points (via rejection sampling).
+  - To approximate the torus with a point cloud, uniformly sample the volume of the object with $N$ points (via rejection sampling).
 - Pretrain model using pseudoinverse (Algorithm 1 warm-start).
 - All sweeps A–F ran under the **old defaults**: linear interpolant, $\gamma = 0.995$.
 
 **What was swept**
 
-| Group | Parameter | Values tested |
-|-------|-----------|---------------|
-| A | coupling ($\alpha_z$, $\alpha_y$) | (0,0), (0,0.5), (0,1), (0.05,0.05), (0.5,0.5), full obs |
-| B | EMA decay $\gamma$ | 0.9, 0.99, 0.995, 0.999 |
-| C | ODE sample steps | 8, 16, 32, (64 baseline) |
-| D | pretrain steps | 0, 500, 2000, 5000 |
-| E | EM vs inner-step ratio | (200 em × 100 tr), (50 em × 400 tr) vs baseline (100 × 200) |
-| F | interpolant style | GVP vs linear |
+
+| Group | Parameter                         | Values tested                                               |
+| ----- | --------------------------------- | ----------------------------------------------------------- |
+| A     | coupling ($\alpha_z$, $\alpha_y$) | (0,0), (0,0.5), (0,1), (0.05,0.05), (0.5,0.5), full obs     |
+| B     | EMA decay $\gamma$                | 0.9, 0.99, 0.995, 0.999                                     |
+| C     | ODE sample steps                  | 8, 16, 32, (64 baseline)                                    |
+| D     | pretrain steps                    | 0, 500, 2000, 5000                                          |
+| E     | EM vs inner-step ratio            | (200 em × 100 tr), (50 em × 400 tr) vs baseline (100 × 200) |
+| F     | interpolant style                 | GVP vs linear                                               |
+
 
 **Findings**
+
 - GVP interpolant helps a lot. See [here](https://wandb.ai/clarkmiyamoto-new-york-university/toy3d-pc-scsi/runs/e63ab6w1/overview?nw=nwuserclarkmiyamoto). Joan had the intuition this would matter, but wasn't sure why. GVP maintains unit variance throughout the ODE ($\alpha^2 + \beta^2 = 1$ at all $t$), which likely gives smoother velocity fields for point cloud targets.
 - Slower EMA $\gamma = 0.999$ appears to help.
 - **Convergence is slow**: needs ~100 EM steps × 200 inner steps, taking ~8 hours.
@@ -54,3 +58,4 @@ Hypothesis: the pseudo-inverse quality sets the warm-start quality, which determ
 - I1: `--tomo-quantile 0.05` (very loose)
 - I2: `--tomo-quantile 0.3` (moderately tight)
 - I3: `--tomo-quantile 0.5` (median — expected to over-carve)
+

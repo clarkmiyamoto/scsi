@@ -29,12 +29,12 @@ when editing here.
 | File                                   | Role                                                                                                                                                                                                            |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `corruption.py`                        | **Forward model `F`** (`forward_channel`) + **pseudo-inverse `F†`** (`pseudo_inverse`/`backproject_tomo`) + rotation helpers (`tilt_rotations`, `random_rotations`, `rotate_clouds`).                           |
-| `si.py`                                | Stochastic interpolant: `linear`/`gvp` schedules, `interpolant(z,x,t,style)→(I_t, İ_t)`, `transport_sample` (conditional Euler ODE `t:0→1`).                                                                    |
+| `si.py`                                | Stochastic interpolant: `linear`/`gvp` schedules, `interpolant(z,x,t,style)→(I_t, İ_t)`, `transport_sample` (Euler or Heun ODE, configurable interval `[eps_start, 1-eps_final]`).                              |
 | `model.py`                             | `ConditionalPointCloudVelocity` (permutation-equivariant set-transformer + image cross-attn, `in_channels=K`), `ConditionalModelConfig`, `build_conditional_model`, EMA helpers `clone_ema`/`ema_update_outer`. |
 | `warmstart.py`                         | **Algorithm 1** — `find_initialization`: train `b̂^(0)` on `(g·F†(y), y)`.                                                                                                                                      |
-| `scsi.py`                              | **Algorithm 2** — `scsi_train` (the literal EM loop, the core deliverable) + `log_em_step`/`log_bootstrap` + checkpoint I/O.                                                                                    |
+| `scsi.py`                              | **Algorithm 2** — `scsi_train` (the literal EM loop, the core deliverable) + `log_em_step`/`log_bootstrap` + checkpoint I/O (`save_checkpoint`, `save_train_state`/`load_train_state` for resume).               |
 | `supervised.py`                        | `train_supervised` debug oracle: train directly on `(x, F(x))` with fresh GT (no EM).                                                                                                                           |
-| `data.py`                              | Shape samplers (`sample_torus`, `sample_cylinder`), `make_mixture_sampler`, `sample_perturbed_dataset` (template/subtomogram dataset), `mixture_surface_residual` diagnostic.                                   |
+| `data.py`                              | Shapes as solids: SDF + bbox per shape (`torus`, `dumbbell`, `trefoil`, `l_shape`, `t_shape`), generic `_sample_solid` rejection sampler, `make_mixture_sampler`, `sample_perturbed_dataset` (template/subtomogram dataset), `mixture_volume_residual` diagnostic (reuses each shape's SDF). |
 | `device.py`                            | CUDA>MPS>CPU autodetect, `autocast`, `needs_grad_scaler`, `configure_backends`.                                                                                                                                 |
 | `tracking.py`                          | W&B `Tracker`, **enabled by default** (graceful no-op if wandb missing/unconfigured).                                                                                                                           |
 | `plot.py`, `balls.py`                  | 3D scatter PNG; optional union-of-balls `.obj` mesh export for W&B.                                                                                                                                             |
@@ -79,15 +79,22 @@ for k in 1..em_steps:                     # EMA frozen during this inner loop
 ```bash
 uv run python -m toy_3d_pc scsi --debug --no-wandb          # ~seconds smoke test
 uv run python -m toy_3d_pc scsi --shape torus --alpha-z 0.5 --alpha-y 0.5
-uv run python -m toy_3d_pc scsi --shape cylinder torus --dataset template --dataset-eps 0.05
+uv run python -m toy_3d_pc scsi --shape dumbbell torus --dataset template --dataset-eps 0.05
 uv run python -m toy_3d_pc scsi --supervised --shape torus  # oracle upper bound
+
+# Resume an interrupted run (pass the same flags as the original run):
+uv run python -m toy_3d_pc scsi --resume toy_3d_pc_checkpoints/model_em0042.pt --em-steps 100 [... original flags ...]
+
+# Heun integrator with trimmed endpoints:
+uv run python -m toy_3d_pc scsi --integrator heun --eps-start 0.01 --eps-final 0.01
 ```
 
 Key flags (see `cli.py` for all + defaults): `--em-steps`(K) `--training-steps`(T_tr)
 `--sample-steps`(ODE steps) `--alpha-z` `--alpha-y` `--ema-decay`(γ) `--pretrain-steps`
 `--n-tilts`(K) `--tilt-step` `--tilt-axis` `--splat {gaussian,ball}` `--radius` `--noise-std`
-`--coord-noise-std` `--interpolant-style {linear,gvp}` `--shape {torus,cylinder}`
-`--dataset {iid,template}`. W&B is **on by default**; pass `--no-wandb` to disable.
+`--coord-noise-std` `--interpolant-style {linear,gvp}` `--shape {torus,dumbbell,trefoil,l_shape,t_shape}`
+`--dataset {iid,template}` `--integrator {euler,heun}` `--eps-start` `--eps-final`
+`--resume CKPT`. W&B is **on by default**; pass `--no-wandb` to disable.
 
 ## Conventions & gotchas (read before editing)
 
@@ -99,14 +106,25 @@ Key flags (see `cli.py` for all + defaults): `--em-steps`(K) `--training-steps`(
 iteration; `sample_steps` = Euler steps in the transport ODE. The literal loop solves an ODE
 *per training step*, so `sample_steps` directly scales cost.
 - **Namespaced outputs — do not revert.** Defaults are `toy_3d_pc_checkpoint.pt`,
-`toy_3d_pc_eval/`, `toy_3d_pc_checkpoints/` (and `*_ema.pt`). They are deliberately distinct
+`toy_3d_pc_eval/`, `toy_3d_pc_checkpoints/`. They are deliberately distinct
 from `toy_3d_pointcloud_et`'s `scsi_checkpoint.pt` / `toy3d_pc_eval/` /
 `toy3d_pc_scsi_checkpoints/` to avoid clobbering that package's artifacts.
+- **Per-EM checkpoint format** (`toy_3d_pc_checkpoints/model_em{k:04d}.pt`): saved by
+`save_train_state` — contains `model`, `model_ema`, `optimizer`, `em_step`, `global_step`,
+`cfg`. Load with `load_train_state` for resume or `load_checkpoint` (model-only). The
+separate `*_ema.pt` files no longer exist; both nets are in the single per-step file.
+- **Resume requires the same `--seed` and data flags** as the original run so `y_obs` is
+reproduced identically (bootstrap + warmstart are skipped; the EM loop picks up from
+`em_step + 1`).
 - The model uses only LayerNorm (no BN/dropout), so `transport_sample` needs no train/eval
 toggle for correctness.
 - `_ball_splat` is non-separable and builds an `(…, N, P, P)` work tensor (chunked over N) — far
 costlier than the default Gaussian; keep N/P modest when using `--splat ball`.
-- Adding a shape: register a sampler in `data.py::SHAPE_SAMPLERS` and (optionally) a
-signed-distance fn in `_SHAPE_SD` so the residual diagnostic covers it.
+- Adding a shape: write an SDF (negative == inside; compose primitives like `_sphere_sd`,
+`_capsule_sd`, `_box_sd` with `min`/`max` for unions/intersections) and register a `_Solid(sd,
+bbox, oversample)` entry in `data.py::_SHAPE_SOLIDS` — sampling and the
+`mixture_volume_residual` diagnostic both derive from it automatically. Thin/sparse solids
+(tubes, sparse unions) need a higher `oversample` so `_sample_solid` converges without hitting
+`max_rounds`.
 - Gitignored ephemera: `*.pt`, `*.png`, checkpoint/eval dirs. Verify with `--debug --no-wandb`.
 

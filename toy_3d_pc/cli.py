@@ -61,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="gamma: EMA decay over the outer EM loop")
     pe.add_argument("--pretrain-steps", type=int, default=2000, help="warm-start SGD steps")
     pe.add_argument("--interpolant-style", choices=["linear", "gvp"], default="gvp")
+    pe.add_argument("--integrator", choices=["euler", "heun"], default="euler",
+                    help="ODE integrator for transport_sample (euler=1st-order, heun=2nd-order)")
+    pe.add_argument("--eps-start", type=float, default=0.0,
+                    help="skip the first eps_start of the [0,1] integration interval")
+    pe.add_argument("--eps-final", type=float, default=0.0,
+                    help="skip the last eps_final of the [0,1] integration interval")
 
     # Data / eval.
     pe.add_argument("--shape", nargs="+", choices=available_shapes(), default=["torus"],
@@ -73,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--seed", type=int, default=0)
     pe.add_argument("--out", default="toy_3d_pc_checkpoint.pt", help="final checkpoint path")
     pe.add_argument("--eval-dir", default="toy_3d_pc_eval", help="where eval PNGs are written")
+    pe.add_argument("--resume", default=None, metavar="CKPT",
+                    help="path to a checkpoint saved by save_train_state to resume EM from")
 
     # Supervised oracle.
     pe.add_argument("--supervised", action="store_true",
@@ -144,6 +152,8 @@ def main(argv: list[str] | None = None) -> None:
                 tilt_step=args.tilt_step, tilt_axis=args.tilt_axis, splat=args.splat,
                 tomo_vol=args.tomo_vol, tomo_quantile=args.tomo_quantile,
                 dataset=args.dataset, dataset_eps=args.dataset_eps,
+                resume_from=args.resume,
+                integrator=args.integrator, eps_start=args.eps_start, eps_final=args.eps_final,
             )
 
 

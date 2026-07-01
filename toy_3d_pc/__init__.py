@@ -18,9 +18,12 @@ from .data import (
     available_shapes,
     make_mixture_sampler,
     mixture_volume_residual,
-    sample_cylinder,
+    sample_dumbbell,
+    sample_l_shape,
     sample_perturbed_dataset,
+    sample_t_shape,
     sample_torus,
+    sample_trefoil,
 )
 from .device import available_device, resolve_device
 from .model import (
@@ -52,7 +55,10 @@ __all__ = [
     "rotate_clouds",
     # data
     "sample_torus",
-    "sample_cylinder",
+    "sample_dumbbell",
+    "sample_trefoil",
+    "sample_l_shape",
+    "sample_t_shape",
     "make_mixture_sampler",
     "sample_perturbed_dataset",
     "mixture_volume_residual",

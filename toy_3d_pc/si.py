@@ -51,24 +51,42 @@ def transport_sample(
     z0: torch.Tensor,        # (B, N, 3) initial noise z'
     y: torch.Tensor,         # (B, K, P, P) conditioning observation
     n_steps: int = 50,
+    integrator: str = "euler",
+    eps_start: float = 0.0,
+    eps_final: float = 0.0,
 ) -> torch.Tensor:
-    """Euler-integrate the conditional flow ODE from t=0 (z') to t=1 -> x-hat (B, N, 3).
+    """Integrate the conditional flow ODE from t=eps_start to t=1-eps_final -> x-hat (B, N, 3).
 
     This is ``Phi(z' | y)``. The network uses only LayerNorm (mode-independent), so no
     train/eval toggle is needed for correctness. Runs under ``no_grad``.
 
     ``y`` is fixed across all ODE steps, so we encode it once and pass the cached
     context tokens on every step instead of re-running the image encoder 64 times.
+
+    integrator: ``"euler"`` (1st-order) or ``"heun"`` (2nd-order predictor-corrector).
+    eps_start / eps_final: trim the integration interval away from the singular endpoints.
     """
     x = z0
     B = z0.size(0)
-    dt = 1.0 / n_steps
+    t_start = eps_start
+    t_end = 1.0 - eps_final
+    dt = (t_end - t_start) / n_steps
     # Encode observation once; fall back to passing y if the model predates this API.
     ctx = model.encode_obs(y) if hasattr(model, "encode_obs") else None
-    for k in range(n_steps):
-        t = torch.full((B,), k * dt, device=z0.device, dtype=z0.dtype)
+
+    def _vel(xv: torch.Tensor, tv: torch.Tensor) -> torch.Tensor:
         if ctx is not None:
-            x = x + model(x, t, ctx=ctx) * dt
+            return model(xv, tv, ctx=ctx)
+        return model(xv, tv, y)
+
+    for k in range(n_steps):
+        t = torch.full((B,), t_start + k * dt, device=z0.device, dtype=z0.dtype)
+        v1 = _vel(x, t)
+        if integrator == "heun":
+            x_pred = x + v1 * dt
+            t2 = torch.full((B,), min(t_start + (k + 1) * dt, t_end), device=z0.device, dtype=z0.dtype)
+            v2 = _vel(x_pred, t2)
+            x = x + (v1 + v2) * (0.5 * dt)
         else:
-            x = x + model(x, t, y) * dt
+            x = x + v1 * dt
     return x
