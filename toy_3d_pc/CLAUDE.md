@@ -85,7 +85,7 @@ uv run python -m toy_3d_pc scsi --shape dumbbell torus --dataset template --data
 uv run python -m toy_3d_pc scsi --supervised --shape torus  # oracle upper bound
 
 # Resume an interrupted run (pass the same flags as the original run):
-uv run python -m toy_3d_pc scsi --resume toy_3d_pc_checkpoints/model_em0042.pt --em-steps 100 [... original flags ...]
+uv run python -m toy_3d_pc scsi --resume toy_3d_pc_checkpoints/<out-stem>/model_em0042.pt --em-steps 100 [... original flags ...]
 
 # Heun integrator with trimmed endpoints:
 uv run python -m toy_3d_pc scsi --integrator heun --eps-start 0.01 --eps-final 0.01
@@ -112,10 +112,12 @@ iteration; `sample_steps` = Euler steps in the transport ODE. The literal loop s
 `toy_3d_pc_eval/`, `toy_3d_pc_checkpoints/`. They are deliberately distinct
 from `toy_3d_pointcloud_et`'s `scsi_checkpoint.pt` / `toy3d_pc_eval/` /
 `toy3d_pc_scsi_checkpoints/` to avoid clobbering that package's artifacts.
-- **Per-EM checkpoint format** (`toy_3d_pc_checkpoints/model_em{k:04d}.pt`): saved by
-`save_train_state` — contains `model`, `model_ema`, `optimizer`, `em_step`, `global_step`,
-`cfg`. Load with `load_train_state` for resume or `load_checkpoint` (model-only). The
-separate `*_ema.pt` files no longer exist; both nets are in the single per-step file.
+- **Per-EM checkpoint format** (`toy_3d_pc_checkpoints/<out-stem>/model_em{k:04d}.pt`, namespaced
+by the `--out` filename stem so concurrent runs don't clobber each other's intermediate
+checkpoints): saved by `save_train_state` — contains `model`, `model_ema`, `optimizer`,
+`em_step`, `global_step`, `cfg`. Load with `load_train_state` for resume or `load_checkpoint`
+(model-only). The separate `*_ema.pt` files no longer exist; both nets are in the single
+per-step file.
 - **Resume requires the same `--seed` and data flags** as the original run so `y_obs` is
 reproduced identically (bootstrap + warmstart are skipped; the EM loop picks up from
 `em_step + 1`).

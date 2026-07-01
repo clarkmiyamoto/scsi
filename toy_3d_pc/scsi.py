@@ -343,8 +343,8 @@ def scsi_train(
     print(f"[scsi] y_obs {tuple(y_obs.shape)}  range=[{y_obs.min():.2f}, {y_obs.max():.2f}]")
 
     out_dir = Path(eval_dir)
-    ckpt_dir = Path("toy_3d_pc_checkpoints")
-    ckpt_dir.mkdir(exist_ok=True)
+    ckpt_dir = Path("toy_3d_pc_checkpoints") / Path(out).stem
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     n_eval = min(n_eval, n_objects)
     gt_eval, y_eval = gt[:n_eval], y_obs[:n_eval]
