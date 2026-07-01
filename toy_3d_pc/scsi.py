@@ -27,6 +27,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from .canonicalize import pca_canonicalize
 from .corruption import forward_channel, pseudo_inverse
 from .data import make_mixture_sampler, mixture_volume_residual, sample_perturbed_dataset
 from .device import autocast, configure_backends, describe, needs_grad_scaler, synchronize
@@ -300,6 +301,7 @@ def scsi_train(
     integrator: str = "euler",
     eps_start: float = 0.0,
     eps_final: float = 0.0,
+    canonicalize: bool = False,
 ) -> nn.Module:
     torch.manual_seed(seed)
     configure_backends(device)
@@ -307,6 +309,7 @@ def scsi_train(
     sample_fn = make_mixture_sampler(shapes)
     print(f"[scsi] device={describe(device)}  amp={use_amp}  shapes={shapes}  splat={splat}")
     print(f"[scsi] integrator={integrator}  eps_start={eps_start}  eps_final={eps_final}")
+    print(f"[scsi] canonicalize={canonicalize}")
 
     if resume_from is not None:
         print(f"[scsi] resuming from {resume_from}")
@@ -399,6 +402,11 @@ def scsi_train(
             z_prime = torch.randn(batch, cfg.n_points, 3, device=device)
             x_hat = transport_sample(model_ema, z_prime, y, **ode_kwargs)
 
+            # x-hat_C = C(x-hat): canonicalize the *regression target* only. y-hat below
+            # keeps using the uncanonicalized x-hat and F's own fresh random pose -- we
+            # deliberately do not fix F to a particular rotation.
+            x_hat_c = pca_canonicalize(x_hat)[0] if canonicalize else x_hat
+
             # alpha_z noise coupling: z = z' w.p. alpha_z, else fresh N(0, I).
             mask_z = (torch.rand(batch, 1, 1, device=device) < alpha_z)
             z = torch.where(mask_z, z_prime, torch.randn_like(z_prime))
@@ -411,7 +419,7 @@ def scsi_train(
 
             with autocast(device, use_amp):
                 t = torch.rand(batch, device=device)
-                I_t, I_dot = interpolant(z, x_hat, t, style)
+                I_t, I_dot = interpolant(z, x_hat_c, t, style)
                 pred = model(I_t, t, y_hat)
                 loss = (pred - I_dot).pow(2).mean()
 

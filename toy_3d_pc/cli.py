@@ -67,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the first eps_start of the [0,1] integration interval")
     pe.add_argument("--eps-final", type=float, default=0.0,
                     help="skip the last eps_final of the [0,1] integration interval")
+    pe.add_argument("--canonicalize", action="store_true",
+                    help="canonicalize x-hat (PCA/moment axes) before it enters the interpolant target; "
+                         "has no effect on F(x-hat) or the noise coupling")
 
     # Data / eval.
     pe.add_argument("--shape", nargs="+", choices=available_shapes(), default=["torus"],
@@ -154,6 +157,7 @@ def main(argv: list[str] | None = None) -> None:
                 dataset=args.dataset, dataset_eps=args.dataset_eps,
                 resume_from=args.resume,
                 integrator=args.integrator, eps_start=args.eps_start, eps_final=args.eps_final,
+                canonicalize=args.canonicalize,
             )
 
 
