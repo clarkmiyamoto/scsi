@@ -27,7 +27,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from .canonicalize import pca_canonicalize
+from .canonicalize import reference_canonicalize, seed_reference, update_reference
 from .corruption import forward_channel, pseudo_inverse
 from .data import make_mixture_sampler, mixture_volume_residual, sample_perturbed_dataset
 from .device import autocast, configure_backends, describe, needs_grad_scaler, synchronize
@@ -65,8 +65,13 @@ def save_train_state(
     em_step: int,
     global_step: int,
     cfg: ConditionalModelConfig,
+    reference: torch.Tensor | None = None,
 ) -> None:
-    """Save full training state (model, EMA, optimizer, loop counters) for resume."""
+    """Save full training state (model, EMA, optimizer, loop counters) for resume.
+
+    ``reference`` is the canonical-frame template used by ``--canonicalize`` (``None`` when
+    canonicalization is off); persisting it keeps the canonical frame identical across resume.
+    """
     torch.save({
         "model": model.state_dict(),
         "model_ema": model_ema.state_dict(),
@@ -74,15 +79,16 @@ def save_train_state(
         "em_step": em_step,
         "global_step": global_step,
         "cfg": asdict(cfg),
+        "reference": None if reference is None else reference.detach().cpu(),
     }, path)
 
 
 def load_train_state(path: str, device: torch.device):
     """Load training state saved by :func:`save_train_state`.
 
-    Returns ``(model, model_ema, opt_state_dict, em_step, global_step, cfg)``.
-    The caller must build the optimizer, call ``opt.load_state_dict(opt_state_dict)``,
-    and resume the EM loop from ``em_step + 1``.
+    Returns ``(model, model_ema, opt_state_dict, em_step, global_step, cfg, reference)``.
+    ``reference`` is ``None`` for pre-canonicalization checkpoints. The caller must build the
+    optimizer, call ``opt.load_state_dict(opt_state_dict)``, and resume from ``em_step + 1``.
     """
     ckpt = torch.load(path, map_location=device, weights_only=True)
     cfg = ConditionalModelConfig(**ckpt["cfg"])
@@ -90,7 +96,11 @@ def load_train_state(path: str, device: torch.device):
     model.load_state_dict(ckpt["model"])
     model_ema = build_conditional_model(cfg, device)
     model_ema.load_state_dict(ckpt["model_ema"])
-    return model, model_ema, ckpt["optimizer"], ckpt["em_step"], ckpt["global_step"], cfg
+    reference = ckpt.get("reference")
+    if reference is not None:
+        reference = reference.to(device)
+    return (model, model_ema, ckpt["optimizer"], ckpt["em_step"],
+            ckpt["global_step"], cfg, reference)
 
 
 # ── Visualization ───────────────────────────────────────────────────────────────
@@ -302,20 +312,35 @@ def scsi_train(
     eps_start: float = 0.0,
     eps_final: float = 0.0,
     canonicalize: bool = False,
+    canon_icp_iters: int = 8,
+    canon_icp_restarts: int = 8,
+    canon_ref_decay: float = 0.99,
 ) -> nn.Module:
     torch.manual_seed(seed)
     configure_backends(device)
     shapes = shapes or ["torus"]
+    if canonicalize and len(shapes) > 1:
+        raise ValueError(
+            "--canonicalize supports a single --shape only (a shared reference frame is "
+            f"ill-defined for a mixture); got shapes={shapes}. Run one shape, or drop "
+            "--canonicalize."
+        )
     sample_fn = make_mixture_sampler(shapes)
     print(f"[scsi] device={describe(device)}  amp={use_amp}  shapes={shapes}  splat={splat}")
     print(f"[scsi] integrator={integrator}  eps_start={eps_start}  eps_final={eps_final}")
-    print(f"[scsi] canonicalize={canonicalize}")
+    if canonicalize:
+        print(f"[scsi] canonicalize=reference-ICP  icp_iters={canon_icp_iters}  "
+              f"icp_restarts={canon_icp_restarts}  ref_decay={canon_ref_decay}")
+    else:
+        print("[scsi] canonicalize=off")
 
+    reference = None
     if resume_from is not None:
         print(f"[scsi] resuming from {resume_from}")
-        model, model_ema, opt_state, start_em, _gs, cfg = load_train_state(resume_from, device)
+        model, model_ema, opt_state, start_em, _gs, cfg, reference = load_train_state(resume_from, device)
         global_step = [_gs]
-        print(f"[scsi] resumed at em_step={start_em}  global_step={_gs}")
+        print(f"[scsi] resumed at em_step={start_em}  global_step={_gs}"
+              f"{'  (reference restored)' if reference is not None else ''}")
     else:
         model = build_conditional_model(cfg, device)
         model_ema = None
@@ -402,10 +427,22 @@ def scsi_train(
             z_prime = torch.randn(batch, cfg.n_points, 3, device=device)
             x_hat = transport_sample(model_ema, z_prime, y, **ode_kwargs)
 
-            # x-hat_C = C(x-hat): canonicalize the *regression target* only. y-hat below
+            # x-hat_C = C(x-hat): canonicalize the *regression target* only, by rigidly
+            # aligning x-hat onto a shared reference frame (multi-start ICP). y-hat below
             # keeps using the uncanonicalized x-hat and F's own fresh random pose -- we
             # deliberately do not fix F to a particular rotation.
-            x_hat_c = pca_canonicalize(x_hat)[0] if canonicalize else x_hat
+            if canonicalize:
+                with torch.no_grad():
+                    if reference is None:                          # seed the frame once
+                        reference = seed_reference(x_hat)
+                    x_hat_c, aligned = reference_canonicalize(
+                        x_hat, reference,
+                        n_iters=canon_icp_iters, n_restarts=canon_icp_restarts,
+                    )
+                    if canon_ref_decay < 1.0:                      # online subtomogram averaging
+                        reference = update_reference(reference, aligned, canon_ref_decay)
+            else:
+                x_hat_c = x_hat
 
             # alpha_z noise coupling: z = z' w.p. alpha_z, else fresh N(0, I).
             mask_z = (torch.rand(batch, 1, 1, device=device) < alpha_z)
@@ -447,7 +484,7 @@ def scsi_train(
         ema_update_outer(model_ema, model, ema_decay)
         save_train_state(
             str(ckpt_dir / f"model_em{k:04d}.pt"),
-            model, model_ema, opt, k, global_step[0], cfg,
+            model, model_ema, opt, k, global_step[0], cfg, reference=reference,
         )
 
         # Eval: sample pi(k) with the EMA transport map and log.

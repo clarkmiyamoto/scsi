@@ -68,8 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--eps-final", type=float, default=0.0,
                     help="skip the last eps_final of the [0,1] integration interval")
     pe.add_argument("--canonicalize", action="store_true",
-                    help="canonicalize x-hat (PCA/moment axes) before it enters the interpolant target; "
-                         "has no effect on F(x-hat) or the noise coupling")
+                    help="canonicalize x-hat (align to a shared reference frame by ICP) before it enters "
+                         "the interpolant target; no effect on F(x-hat) or the noise coupling. Single --shape only")
+    pe.add_argument("--canon-icp-iters", type=int, default=8,
+                    help="[--canonicalize] NN+Kabsch iterations per ICP restart")
+    pe.add_argument("--canon-icp-restarts", type=int, default=8,
+                    help="[--canonicalize] seed rotations tried per alignment (best Chamfer kept)")
+    pe.add_argument("--canon-ref-decay", type=float, default=0.99,
+                    help="[--canonicalize] EMA decay for the reference template (1.0 = freeze after seeding)")
 
     # Data / eval.
     pe.add_argument("--shape", nargs="+", choices=available_shapes(), default=["torus"],
@@ -158,6 +164,9 @@ def main(argv: list[str] | None = None) -> None:
                 resume_from=args.resume,
                 integrator=args.integrator, eps_start=args.eps_start, eps_final=args.eps_final,
                 canonicalize=args.canonicalize,
+                canon_icp_iters=args.canon_icp_iters,
+                canon_icp_restarts=args.canon_icp_restarts,
+                canon_ref_decay=args.canon_ref_decay,
             )
 
 

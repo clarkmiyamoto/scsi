@@ -29,7 +29,7 @@ when editing here.
 | File                                   | Role                                                                                                                                                                                                            |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `corruption.py`                        | **Forward model `F`** (`forward_channel`) + **pseudo-inverse `F†`** (`pseudo_inverse`/`backproject_tomo`) + rotation helpers (`tilt_rotations`, `random_rotations`, `rotate_clouds`).                           |
-| `canonicalize.py`                      | Canonicalization operator `C` (`pca_canonicalize`): PCA/moment-axis alignment, used to derotate the interpolant target in `scsi.py` when `--canonicalize` is passed. Ill-defined in-plane angle for continuously-symmetric shapes (e.g. `torus`) — validate on `trefoil`/`l_shape`/`t_shape`.                          |
+| `canonicalize.py`                      | Canonicalization operator `C`. **`reference_canonicalize`** (used by `--canonicalize`): rigidly aligns `x̂` to a shared reference cloud by multi-start ICP (`kabsch`+NN corr., `icp_align`), so every sample lands in one frame; reference is `seed_reference`'d from one cloud then EMA-updated via `update_reference` (online subtomogram averaging). `pca_canonicalize` (superseded, reference-free) kept for reference — its frame is noise-driven under symmetry/eigen-degeneracy. Validate on `trefoil` (chiral).                          |
 | `si.py`                                | Stochastic interpolant: `linear`/`gvp` schedules, `interpolant(z,x,t,style)→(I_t, İ_t)`, `transport_sample` (Euler or Heun ODE, configurable interval `[eps_start, 1-eps_final]`).                              |
 | `model.py`                             | `ConditionalPointCloudVelocity` (permutation-equivariant set-transformer + image cross-attn, `in_channels=K`), `ConditionalModelConfig`, `build_conditional_model`, EMA helpers `clone_ema`/`ema_update_outer`. |
 | `warmstart.py`                         | **Algorithm 1** — `find_initialization`: train `b̂^(0)` on `(g·F†(y), y)`.                                                                                                                                      |
@@ -68,7 +68,7 @@ for k in 1..em_steps:                     # EMA frozen during this inner loop
     for i in 1..training_steps:           # T_tr inner SGD steps
         y = minibatch(y_obs)
         z' ~ N(0,I);  x̂ = transport_sample(model_ema, z', y, sample_steps)   # Φ_EMA(z'|y)
-        x̂_C = C(x̂)  if --canonicalize else x̂                                 # PCA/moment-axis derotation
+        x̂_C = C(x̂)  if --canonicalize else x̂                                 # ICP-align x̂ to shared reference frame
         z  = z' w.p. α_z else N(0,I)                                          # noise coupling
         ŷ  = F(x̂);  ŷ = y w.p. α_y else ŷ                                     # obs coupling (always uses x̂, not x̂_C)
         I_t, İ_t = interpolant(z, x̂_C, t);  loss = ‖model(I_t,t,ŷ) − İ_t‖²; opt.step()
@@ -96,8 +96,8 @@ Key flags (see `cli.py` for all + defaults): `--em-steps`(K) `--training-steps`(
 `--n-tilts`(K) `--tilt-step` `--tilt-axis` `--splat {gaussian,ball}` `--radius` `--noise-std`
 `--coord-noise-std` `--interpolant-style {linear,gvp}` `--shape {torus,dumbbell,trefoil,l_shape,t_shape}`
 `--dataset {iid,template}` `--integrator {euler,heun}` `--eps-start` `--eps-final`
-`--resume CKPT` `--canonicalize` (off by default). W&B is **on by default**; pass `--no-wandb`
-to disable.
+`--resume CKPT` `--canonicalize` (off by default; `--canon-icp-iters` `--canon-icp-restarts`
+`--canon-ref-decay` tune it). W&B is **on by default**; pass `--no-wandb` to disable.
 
 ## Conventions & gotchas (read before editing)
 
@@ -115,7 +115,9 @@ from `toy_3d_pointcloud_et`'s `scsi_checkpoint.pt` / `toy3d_pc_eval/` /
 - **Per-EM checkpoint format** (`toy_3d_pc_checkpoints/<out-stem>/model_em{k:04d}.pt`, namespaced
 by the `--out` filename stem so concurrent runs don't clobber each other's intermediate
 checkpoints): saved by `save_train_state` — contains `model`, `model_ema`, `optimizer`,
-`em_step`, `global_step`, `cfg`. Load with `load_train_state` for resume or `load_checkpoint`
+`em_step`, `global_step`, `cfg`, and `reference` (canonical-frame template, `None` when
+`--canonicalize` is off / pre-canonicalization checkpoints). Load with `load_train_state` for
+resume (returns a 7-tuple ending in `reference`) or `load_checkpoint`
 (model-only). The separate `*_ema.pt` files no longer exist; both nets are in the single
 per-step file.
 - **Resume requires the same `--seed` and data flags** as the original run so `y_obs` is
@@ -135,9 +137,25 @@ bbox, oversample)` entry in `data.py::_SHAPE_SOLIDS` — sampling and the
 - **`--canonicalize` only reframes the interpolant target, nothing else.** `x̂_C = C(x̂)` replaces
 `x̂` in `I_t`/`İ_t` only; `ŷ = F(x̂)` and the `α_z` noise coupling still use the uncanonicalized
 `x̂` and `F`'s own fresh random pose — deliberate, so `F` is never fixed to a particular rotation.
-`pca_canonicalize` pins axis order + sign via eigenvalue magnitude and third-moment skew, but a
-continuously-symmetric shape (`torus`) has no identifiable in-plane angle — that DOF stays a
-moving target even with `--canonicalize` on. Validate on `trefoil`/`l_shape`/`t_shape` (no
-continuous symmetry) first. `torch.linalg.eigh` has no MPS kernel, so `pca_canonicalize` routes
-its (tiny, `(B,3,3)`) eigendecomposition through CPU regardless of training device.
+- **`C` is reference-ICP, not PCA (PCA was tried first and *hurt*).** Reference-free
+`pca_canonicalize` derives the frame from `x̂`'s own eigenstructure, so every DOF a shape's
+symmetry or a near-degenerate eigenvalue leaves unidentifiable gets picked by per-sample
+*sampling noise* — a different frame each call, which injects rotation noise into the
+elementwise-MSE target and self-reinforces (blurrier `x̂` → more isotropic cov → more random
+frame). `reference_canonicalize` instead aligns every `x̂` onto **one shared reference cloud**
+by multi-start ICP, so consistency holds by construction and symmetry-equivalent poses tie on
+Chamfer and resolve to whichever is nearest the reference (stable, not a coin flip). This fixes
+symmetric shapes too: `torus`/`dumbbell` hit the sampling-noise floor. `trefoil` (chiral) is the
+cleanest validation. `l_shape`/`t_shape` keep a residual front/back flip ambiguity (thin +
+mirror-symmetric) — more restarts don't help; it's intrinsic, like the torus DOF.
+- **Reference lifecycle:** `seed_reference` picks one representative cloud (canonical frame is
+only defined up to a global rotation — consistency is what matters, not absolute orientation);
+`update_reference` EMA-blends via ICP *correspondences* (scatter-mean onto reference indices,
+`--canon-ref-decay`, 1.0=freeze) — a point-wise mean would be invalid since clouds are unordered.
+The reference is persisted in the per-EM checkpoint (`save_train_state`) so `--resume` keeps the
+identical frame; it is GT-free (never touches `x_gt`). `--canonicalize` is **single-shape only**
+(a shared reference is ill-defined for a mixture — raises on >1 `--shape`).
+- `kabsch` forbids reflections (det-fix) so chiral shapes are never mirrored; `torch.linalg.svd`
+has no MPS kernel, so the tiny `(…,3,3)` SVD routes through CPU **only on MPS** (native on CUDA,
+no per-step sync).
 
