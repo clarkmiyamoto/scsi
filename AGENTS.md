@@ -1,4 +1,4 @@
-# scsi — navigation guide for Claude
+# scsi — navigation guide for Codex
 
 Research codebase for **Self-Consistent Stochastic Interpolants (SCSI)**: recovering a prior over clean signals from corrupted observations via an EM loop where the E-step trains a stochastic-interpolant velocity field and the M-step updates the prior. Four parallel experiment scopes scale up complexity (toy 2D → toy 3D → MNIST → ModelNet cryoEM); they all share the same module skeleton, so learn one and you know them all.
 
@@ -17,7 +17,7 @@ Research codebase for **Self-Consistent Stochastic Interpolants (SCSI)**: recove
 | `simple_3d/` | ModelNet10 voxel reconstruction under SO(3) → Radon → AWGN (cryoEM forward model), UNet3D. |
 | `toy_2d/` | Two-moons exploration. Two notebooks + one reverse-dream script. |
 | `toy_3d/` | Synthetic primitives (sphere / cube / cylinder / ellipsoid / torus) under cryoEM corruption. |
-| `toy_2d_pc/` | 2D point-cloud SCSI: MNIST-digit silhouettes under a CryoEM-style 2D-image→1D-sinogram channel (gaussian/disk/histogram rendering + SO(2) tilt series). Self-contained package, see `toy_2d_pc/CLAUDE.md`. |
+| `toy_2d_pc/` | 2D point-cloud SCSI: MNIST-digit silhouettes under a CryoEM-style 2D-image→1D-sinogram channel (gaussian/disk/histogram rendering + SO(2) tilt series). Self-contained package, see `toy_2d_pc/AGENTS.md`. |
 | `data/` | Auto-downloaded datasets (currently just MNIST). |
 | `writing/` | Reserved for papers — currently empty. |
 | `main.py` | Top-level stub (`print("Hello from scsi!")`). Ignore. |
