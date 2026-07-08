@@ -416,13 +416,15 @@ def main():
     ).to(cfg.device).eval()
 
     # Single persistent network + optimizer, reused across all EM steps
-    # (no re-initialization), with a linear lr decay over the whole run.
+    # (no re-initialization), with an exponential lr decay over the whole
+    # run: multiplying by a constant factor each step means the absolute
+    # step size shrinks as lr shrinks, so most steps are spent near lr_end
+    # rather than near lr_start.
     model = LinearInXYDrift(cfg.d, cfg.hidden, cfg.depth).to(cfg.device)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr_start, weight_decay=cfg.weight_decay)
     total_steps = cfg.n_em * cfg.n_train
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        opt, start_factor=1.0, end_factor=cfg.lr_end / cfg.lr_start, total_iters=total_steps
-    )
+    gamma = (cfg.lr_end / cfg.lr_start) ** (1.0 / total_steps)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=gamma)
 
     ts_grid = torch.linspace(1e-3, 1 - 1e-3, 300, device=cfg.device).reshape(-1, 1)
 
