@@ -109,6 +109,7 @@ def run_fixed_y(rng, d, mu, Sigma, s2, M, solve_particles, N=1000, y_offset=(1.0
     ax.axis("equal")
     ax.legend(loc="lower right")
     fig.tight_layout()
+    plt.savefig("fixed_y_trajectories.png", dpi=300)
     plt.show()
 
     # ============================================================
@@ -198,6 +199,7 @@ def run_fixed_y(rng, d, mu, Sigma, s2, M, solve_particles, N=1000, y_offset=(1.0
     ax.axis("equal")
     ax.legend(loc="lower right")
     fig.tight_layout()
+    plt.savefig("fixed_y_terminal_law.png", dpi=300)
     plt.show()
 
     print("\n================ Fixed y diagnostic ================")
@@ -305,6 +307,7 @@ def run_marginal(rng, d, mu, Sigma, s2, I, solve_particles, N_marginal=3000):
     ax.axis("equal")
     ax.legend(loc="lower right")
     fig.tight_layout()
+    plt.savefig("marginal_recovery.png", dpi=300)
     plt.show()
 
     return {
