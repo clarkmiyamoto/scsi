@@ -48,7 +48,9 @@ class Config:
     n_em: int = 10
     n_train: int = 300
     batch_size: int = 512
-    lr: float = 5e-4
+    lr_start: float = 1e-3
+    lr_end: float = 1e-6
+    weight_decay: float = 0.0
     hidden: int = 64
     depth: int = 3
     ode_steps_train: int = 64
@@ -65,7 +67,9 @@ def parse_args() -> Config:
     p.add_argument("--n-em", type=int, default=4)
     p.add_argument("--n-train", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=512)
-    p.add_argument("--lr", type=float, default=5e-4)
+    p.add_argument("--lr-start", type=float, default=1e-3)
+    p.add_argument("--lr-end", type=float, default=1e-6)
+    p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--depth", type=int, default=3)
     p.add_argument("--ode-steps-train", type=int, default=64)
@@ -80,7 +84,9 @@ def parse_args() -> Config:
         n_em=a.n_em,
         n_train=a.n_train,
         batch_size=a.batch_size,
-        lr=a.lr,
+        lr_start=a.lr_start,
+        lr_end=a.lr_end,
+        weight_decay=a.weight_decay,
         hidden=a.hidden,
         depth=a.depth,
         ode_steps_train=a.ode_steps_train,
@@ -239,15 +245,20 @@ def sample_observed(mu_t, Sigma_t, s2, batch_size, device):
     return mu_t + z @ L.T
 
 
-def train_one_em_step(cfg, current_model, mu_t, Sigma_t, s2, em_idx):
-    learner = LinearInXYDrift(cfg.d, cfg.hidden, cfg.depth).to(cfg.device)
-    opt = torch.optim.AdamW(learner.parameters(), lr=cfg.lr, weight_decay=1e-5)
-    losses = []
+def train_one_em_step(cfg, model, opt, scheduler, target_model, mu_t, Sigma_t, s2, em_idx):
+    """
+    Trains `model` in place for cfg.n_train steps (persistent across EM
+    iterations: same weights, same optimizer state, continuing lr schedule).
 
+    `target_model` supplies the frozen Phi^(k) used to produce guessed clean
+    samples xhat. On EM step 1 this is the deliberately-wrong analytic guess;
+    from EM step 2 onward it is `model` itself (self-consistent continuation
+    of the same network), so training never resets.
+    """
+    losses = []
     s_std = math.sqrt(s2)
 
-    current_model.eval()
-    learner.train()
+    model.train()
     for step in range(1, cfg.n_train + 1):
         # y is real observed data from nu.
         y = sample_observed(mu_t, Sigma_t, s2, cfg.batch_size, cfg.device)
@@ -257,25 +268,27 @@ def train_one_em_step(cfg, current_model, mu_t, Sigma_t, s2, em_idx):
 
         # EM-style step: freeze Phi^(k), produce guessed clean samples.
         with torch.no_grad():
-            xhat = flow(current_model, z_prime, y, cfg.ode_steps_train)
+            xhat = flow(target_model, z_prime, y, cfg.ode_steps_train)
             yhat = xhat + s_std * torch.randn_like(xhat)
 
             It = alpha(t) * z + beta(t) * xhat
             dIt = alphadot(t) * z + betadot(t) * xhat  # linear schedule: xhat - z
 
-        pred = learner(t, It, yhat)
+        pred = model(t, It, yhat)
         loss = torch.mean((pred - dIt) ** 2)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(learner.parameters(), 10.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         opt.step()
+        scheduler.step()
 
         losses.append(float(loss.detach().cpu()))
         if step % max(1, cfg.n_train // 5) == 0:
-            print(f"EM {em_idx:02d} | step {step:05d}/{cfg.n_train} | loss {losses[-1]:.4e}")
+            lr = opt.param_groups[0]["lr"]
+            print(f"EM {em_idx:02d} | step {step:05d}/{cfg.n_train} | loss {losses[-1]:.4e} | lr {lr:.2e}")
 
-    return learner.eval(), losses
+    return model.eval(), losses
 
 
 @torch.no_grad()
@@ -396,11 +409,20 @@ def main():
     print(f"noise variance s^2 = {s2:.4f}")
     print(f"initial (wrong, isotropic) analytic prior variance: {cfg.init_prior_std**2:.4f}")
 
-    current_model = AnalyticGaussianDrift(
+    init_model = AnalyticGaussianDrift(
         d=cfg.d,
         prior_var=cfg.init_prior_std**2,
         noise_var=s2,
     ).to(cfg.device).eval()
+
+    # Single persistent network + optimizer, reused across all EM steps
+    # (no re-initialization), with a linear lr decay over the whole run.
+    model = LinearInXYDrift(cfg.d, cfg.hidden, cfg.depth).to(cfg.device)
+    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr_start, weight_decay=cfg.weight_decay)
+    total_steps = cfg.n_em * cfg.n_train
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        opt, start_factor=1.0, end_factor=cfg.lr_end / cfg.lr_start, total_iters=total_steps
+    )
 
     ts_grid = torch.linspace(1e-3, 1 - 1e-3, 300, device=cfg.device).reshape(-1, 1)
 
@@ -408,21 +430,27 @@ def main():
     stats = []
     all_coeff_diag = []
 
+    current_model = init_model
     _, m0, c0 = estimate_marginal_stats(cfg, current_model, mu_t, Sigma_t, s2)
     stats.append((0, m0, c0))
     all_coeff_diag.append(coefficient_error_diagnostics(current_model, ts_grid))
     print(f"k=00 | mean={m0.numpy()} | cov=\n{c0.numpy()}")
 
     for k in range(1, cfg.n_em + 1):
-        current_model, losses = train_one_em_step(cfg, current_model, mu_t, Sigma_t, s2, k)
+        # EM step 1 bootstraps off the deliberately-wrong analytic guess;
+        # afterwards the network continues from its own current weights.
+        target_model = init_model if k == 1 else model
+        model, losses = train_one_em_step(cfg, model, opt, scheduler, target_model, mu_t, Sigma_t, s2, k)
+        current_model = model
         all_losses.append(losses)
 
         _, mk, ck = estimate_marginal_stats(cfg, current_model, mu_t, Sigma_t, s2)
         stats.append((k, mk, ck))
         all_coeff_diag.append(coefficient_error_diagnostics(current_model, ts_grid))
-
-        err = torch.linalg.norm(ck - Sigma_t.cpu())
-        print(f"k={k:02d} | mean={mk.numpy()} | cov error={err:.4e}")
+        
+        err_mean = torch.linalg.norm(mk - mu_t.cpu())
+        err_cov = torch.linalg.norm(ck - Sigma_t.cpu())
+        print(f"k={k:02d} | mean error={err_mean:.4e} | cov error={err_cov:.4e}")
 
     # ============================================================
     # Same experiments as exact_drift.py, but driven by the final
