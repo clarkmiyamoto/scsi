@@ -1,12 +1,16 @@
 """
-Self-consistent EM-style drift learning for the same 2D Gaussian AWGN inverse
-problem solved exactly in exact_drift.py:
+Self-consistent EM-style drift learning for the d-dimensional Gaussian AWGN
+inverse problem solved exactly in exact_drift.py for d=2:
 
     X ~ N(mu, Sigma)
-    Y = F(X) = X + W,  W ~ N(0, s^2 I_2)
+    Y = F(X) = X + W,  W ~ N(0, s^2 I_d)
 
-mu, Sigma, s are imported directly from exact_drift.py so both scripts model
-the exact same problem instance.
+At --d 2 (default), mu, Sigma, s are the exact same fixed instance imported
+from exact_drift.py, so both scripts model the exact same problem. At any
+other --d, a random SPD Sigma and mu are drawn from --seed (see
+make_gaussian_awgn_problem); the exact closed-form b_t(a|y) coefficients
+generalize unchanged (see make_C_matrices_fn, same derivation as
+exact_drift.C_matrices, parametrized instead of hardcoded to d=2).
 
 The learned drift has the constrained form
     b_theta(t, x | y) = A_theta(t) + B_theta(t) x + C_theta(t) y,
@@ -14,11 +18,18 @@ where one MLP of t outputs A_theta, B_theta, C_theta. This matches the exact
 closed form derived in exact_drift.py:
     b_t(a | y) = (C1_t mu) + C2_t a + C3_t y.
 
+Plots are always 2D snapshots onto a chosen coordinate pair (--plot-dims,
+default the first two axes); diagnostics (mean/std z-scores, Mahalanobis
+radius, whitened per-axis z-scores) run over all d dimensions regardless.
+
 Run:
     uv run python em_exact_drift.py
 
 For a better fit, increase --n-train and --n-em, ideally on GPU:
     uv run python em_exact_drift.py --n-train 2000 --n-em 6 --device cuda
+
+For a higher-dimensional problem instance:
+    uv run python em_exact_drift.py --d 8 --plot-dims 0 3
 """
 
 import argparse
@@ -30,7 +41,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from exact_drift import mu as MU_NP, Sigma as SIGMA_NP, s2 as S2_NP, I as I_NP, M as M_NP, C_matrices
+from exact_drift import mu as MU_NP, Sigma as SIGMA_NP, s2 as S2_NP
 from experiments import run_fixed_y, run_marginal
 
 
@@ -44,6 +55,8 @@ DEFAULT_DEVICE = (
 @dataclass
 class Config:
     d: int = 2
+    noise_std: float = 0.7
+    plot_dims: tuple = (0, 1)
     init_prior_std: float = 0.8
     n_em: int = 10
     n_train: int = 300
@@ -63,6 +76,9 @@ class Config:
 
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
+    p.add_argument("--d", type=int, default=2, help="Problem dimension. d=2 reuses the fixed instance from exact_drift.py; any other d draws a random SPD Sigma from --seed.")
+    p.add_argument("--noise-std", type=float, default=0.7, help="AWGN std s (only used when --d != 2; the d=2 instance uses exact_drift.py's fixed s)")
+    p.add_argument("--plot-dims", type=int, nargs=2, default=[0, 1], metavar=("I", "J"), help="Which 2 coordinates (0-indexed) to use for the 2D scatter/contour plots. Diagnostics still cover all d dims.")
     p.add_argument("--init-prior-std", type=float, default=0.8)
     p.add_argument("--n-em", type=int, default=4)
     p.add_argument("--n-train", type=int, default=300)
@@ -72,14 +88,25 @@ def parse_args() -> Config:
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--depth", type=int, default=3)
-    p.add_argument("--ode-steps-train", type=int, default=64)
+    p.add_argument("--ode-steps-train", type=int, default=64, help="Euler steps for training (ODE solve)")
     p.add_argument("--ode-steps-eval", type=int, default=100)
+    p.add_argument("--t_start_eps", type=float, default=0.0, help="Integrate from [t_start_eps, 1-t_end_eps] to avoid singularities at t=0,1")
+    p.add_argument("--t_end_eps", type=float, default=1e-4, help="Integrate from [t_start_eps, 1-t_end_eps] to avoid singularities at t=0,1")
     p.add_argument("--n-eval", type=int, default=20000)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", type=str, default=DEFAULT_DEVICE)
     p.add_argument("--out-prefix", type=str, default="scsi_gaussian")
     a = p.parse_args()
+
+    if a.d < 2:
+        raise ValueError(f"--d must be >= 2, got {a.d}")
+    if max(a.plot_dims) >= a.d or min(a.plot_dims) < 0:
+        raise ValueError(f"--plot-dims {a.plot_dims} out of range for d={a.d}")
+
     return Config(
+        d=a.d,
+        noise_std=a.noise_std,
+        plot_dims=tuple(a.plot_dims),
         init_prior_std=a.init_prior_std,
         n_em=a.n_em,
         n_train=a.n_train,
@@ -96,6 +123,50 @@ def parse_args() -> Config:
         device=a.device,
         out_prefix=a.out_prefix,
     )
+
+
+def make_gaussian_awgn_problem(d, seed, noise_std):
+    """
+    X ~ N(mu, Sigma), Y = X + N(0, s^2 I_d).
+
+    d == 2 reuses the fixed instance from exact_drift.py so default runs stay
+    directly comparable to exact_drift.py's own plots. For any other d, mu
+    and a random SPD Sigma with nontrivial off-diagonal correlation are drawn
+    from `seed` (so runs are reproducible), and s2 = noise_std**2.
+    """
+    if d == 2:
+        return MU_NP.copy(), SIGMA_NP.copy(), float(S2_NP)
+
+    rng = np.random.default_rng(seed)
+    mu = rng.normal(scale=1.0, size=d)
+    A = rng.normal(size=(d, d))
+    Sigma = A @ A.T / d + 0.5 * np.eye(d)
+    return mu, Sigma, float(noise_std ** 2)
+
+
+def make_C_matrices_fn(Sigma, s2, d):
+    """
+    Builds the exact closed-form coefficient function
+        b_t(a | y) = C1(t) mu + C2(t) a + C3(t) y
+    for the linear-schedule (alpha_t=1-t, beta_t=t) Gaussian AWGN problem, for
+    arbitrary dimension d. Same derivation as exact_drift.C_matrices /
+    S_t / R_t, but parametrized on (Sigma, s2, d) instead of exact_drift.py's
+    module-level 2D globals, so it works for any problem instance.
+    """
+    I = np.eye(d)
+    M = Sigma @ np.linalg.inv(Sigma + s2 * I)
+
+    def C_matrices_fn(t):
+        S = (1 - t) ** 2 * I + (t ** 2) * s2 * M
+        Sinv = np.linalg.inv(S)
+        R = (1 - t) * I - t * s2 * M
+
+        C1 = (1 - t) * (I - M) @ Sinv
+        C2 = -R @ Sinv
+        C3 = (1 - t) * M @ Sinv
+        return C1, C2, C3
+
+    return C_matrices_fn, M, I
 
 
 def alpha(t):
@@ -322,27 +393,27 @@ def model_coefficients(model, ts):
     return A, B, C
 
 
-def ideal_coefficients(ts_np):
+def ideal_coefficients(ts_np, mu, C_matrices_fn):
     """
-    Evaluates the exact closed-form coefficients from exact_drift.C_matrices
-    at each t, using b_t(a|y) = A(t) + B(t)a + C(t)y with
+    Evaluates the exact closed-form coefficients from C_matrices_fn (see
+    make_C_matrices_fn) at each t, using b_t(a|y) = A(t) + B(t)a + C(t)y with
         A(t) = C1(t) @ mu,  B(t) = C2(t),  C(t) = C3(t).
     """
     A_list, B_list, C_list = [], [], []
     for t in ts_np:
-        C1, C2, C3 = C_matrices(float(t))
-        A_list.append(C1 @ MU_NP)
+        C1, C2, C3 = C_matrices_fn(float(t))
+        A_list.append(C1 @ mu)
         B_list.append(C2)
         C_list.append(C3)
     return np.stack(A_list), np.stack(B_list), np.stack(C_list)
 
 
 @torch.no_grad()
-def coefficient_error_diagnostics(model, ts_grid):
+def coefficient_error_diagnostics(model, ts_grid, mu, C_matrices_fn):
     """Error between the learned drift's coefficients and the ideal ones."""
     ts_np = ts_grid.cpu().numpy().squeeze(-1)
     A, B, C = model_coefficients(model, ts_grid)
-    A_true, B_true, C_true = ideal_coefficients(ts_np)
+    A_true, B_true, C_true = ideal_coefficients(ts_np, mu, C_matrices_fn)
 
     return {
         "t": ts_np,
@@ -400,12 +471,15 @@ def main():
 
     torch.manual_seed(cfg.seed)
 
-    mu_t = torch.tensor(MU_NP, dtype=torch.float32, device=cfg.device)
-    Sigma_t = torch.tensor(SIGMA_NP, dtype=torch.float32, device=cfg.device)
-    s2 = float(S2_NP)
+    mu_np, Sigma_np, s2 = make_gaussian_awgn_problem(cfg.d, cfg.seed, cfg.noise_std)
+    C_matrices_fn, M_np, I_np = make_C_matrices_fn(Sigma_np, s2, cfg.d)
+
+    mu_t = torch.tensor(mu_np, dtype=torch.float32, device=cfg.device)
+    Sigma_t = torch.tensor(Sigma_np, dtype=torch.float32, device=cfg.device)
 
     print(f"device: {cfg.device}")
-    print(f"target prior: N(mu={MU_NP}, Sigma=\n{SIGMA_NP})")
+    print(f"d = {cfg.d}, plot_dims = {cfg.plot_dims}")
+    print(f"target prior: N(mu={mu_np}, Sigma=\n{Sigma_np})")
     print(f"noise variance s^2 = {s2:.4f}")
     print(f"initial (wrong, isotropic) analytic prior variance: {cfg.init_prior_std**2:.4f}")
 
@@ -435,7 +509,7 @@ def main():
     current_model = init_model
     _, m0, c0 = estimate_marginal_stats(cfg, current_model, mu_t, Sigma_t, s2)
     stats.append((0, m0, c0))
-    all_coeff_diag.append(coefficient_error_diagnostics(current_model, ts_grid))
+    all_coeff_diag.append(coefficient_error_diagnostics(current_model, ts_grid, mu_np, C_matrices_fn))
     print(f"k=00 | mean={m0.numpy()} | cov=\n{c0.numpy()}")
 
     for k in range(1, cfg.n_em + 1):
@@ -448,29 +522,34 @@ def main():
 
         _, mk, ck = estimate_marginal_stats(cfg, current_model, mu_t, Sigma_t, s2)
         stats.append((k, mk, ck))
-        all_coeff_diag.append(coefficient_error_diagnostics(current_model, ts_grid))
-        
+        all_coeff_diag.append(coefficient_error_diagnostics(current_model, ts_grid, mu_np, C_matrices_fn))
+
         err_mean = torch.linalg.norm(mk - mu_t.cpu())
         err_cov = torch.linalg.norm(ck - Sigma_t.cpu())
         print(f"k={k:02d} | mean error={err_mean:.4e} | cov error={err_cov:.4e}")
 
     # ============================================================
     # Same experiments as exact_drift.py, but driven by the final
-    # EM-learned drift instead of the closed-form one.
+    # EM-learned drift instead of the closed-form one. Scatter/contour
+    # plots are always a 2D snapshot on cfg.plot_dims; diagnostics
+    # (including the Mahalanobis-radius ones) cover all cfg.d dims.
     # ============================================================
 
     rng = np.random.default_rng(cfg.seed)
     solve_particles_em = make_numpy_solve_particles(current_model, cfg.device, cfg.ode_steps_eval)
 
-    run_fixed_y(rng, cfg.d, MU_NP, SIGMA_NP, s2, M_NP, solve_particles_em)
-    run_marginal(rng, cfg.d, MU_NP, SIGMA_NP, s2, I_NP, solve_particles_em)
+    plot_out_prefix = f"{cfg.out_prefix}_d{cfg.d}_"
+    run_fixed_y(rng, cfg.d, mu_np, Sigma_np, s2, M_np, solve_particles_em,
+                dims=cfg.plot_dims, out_prefix=plot_out_prefix)
+    run_marginal(rng, cfg.d, mu_np, Sigma_np, s2, I_np, solve_particles_em,
+                 dims=cfg.plot_dims, out_prefix=plot_out_prefix)
 
     # ============================================================
     # EM-specific diagnostics: training loss and coefficient convergence
     # ============================================================
 
-    coeff_evo_path = f"{cfg.out_prefix}_coeff_error_evolution.png"
-    loss_path = f"{cfg.out_prefix}_losses.png"
+    coeff_evo_path = f"{cfg.out_prefix}_d{cfg.d}_coeff_error_evolution.png"
+    loss_path = f"{cfg.out_prefix}_d{cfg.d}_losses.png"
 
     plot_coefficient_error_evolution(all_coeff_diag, coeff_evo_path)
     plot_losses(all_losses, loss_path)
