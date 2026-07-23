@@ -36,6 +36,11 @@ for k in 1..K:
 `em.py::run_em_loop` is the `for k in 1..K` line; everything inside one iteration is
 `scsi.py`.
 
+`pretrain.py` is an optional stage that runs *before* this loop: ordinary supervised
+stochastic-interpolant training on known GT digits, producing a `Theta^(0)` checkpoint that
+`main.py --init_ckpt` can load instead of starting the EM loop from a random init. See its
+own section below — it deliberately does not reuse `scsi.py::train_mstep`.
+
 ## File map
 
 | File | Role |
@@ -48,7 +53,8 @@ for k in 1..K:
 | `corruption.py` | Forward channel `F`: `sample_uniform_angle` (Haar-uniform SO(2), literal `z~N(0,1)` direction), `rotate_2d` (black-fill in-plane rotation), `project_1d`, `forward_channel` (rotate → project → AWGN). |
 | `data.py` | `load_mnist_subset`, `build_observations` (applies `corruption.forward_channel` `corruptions_per_image` times per digit to build the observation set `mu`; keeps `theta_star` as a diagnostic-only ground truth, never fed to the model). |
 | `wandb_logging.py` | `log_train_step` (per-SGD-step scalars, extracted from `train_mstep`'s inner loop), `log_em_step` (4-row reconstruction panel + mean circular-error diagnostic). Degrades gracefully without wandb (`_WANDB_AVAILABLE`), same pattern as everywhere else in the repo. |
-| `main.py` | CLI (`argparse`), device autodetect, `--debug` tiny-run defaults, dataset load, model/optimizer construction, `wandb.init`/`finish`, one call to `em.run_em_loop(...)`. |
+| `main.py` | CLI (`argparse`), device autodetect, `--debug` tiny-run defaults, dataset load, model/optimizer construction, optional `--init_ckpt` load, `wandb.init`/`finish`, one call to `em.run_em_loop(...)`. |
+| `pretrain.py` | **Supervised warm-start for `Theta^(0)`.** Flat stochastic-interpolant SGD loop (no outer/inner loop) directly on `scsi.py::loss_func_joint` — draws a fresh random rotation `R` per step, keeps the GT digit canonical, computes `y = corruption.forward_channel(x_i, theta=R)`. Pluggable pool selection via `SELECTION_STRATEGIES` (currently one entry, `per_class`, drawing `--n_pretrain_images_per_class` images from each of `--digit_classes`). Saves a `model.state_dict()` checkpoint that `main.py --init_ckpt` can load directly. |
 
 ## How to run
 
@@ -56,12 +62,24 @@ for k in 1..K:
 uv run python main.py --debug --no_wandb    # ~seconds smoke test, no wandb needed
 uv run python main.py                       # full run, default hyperparameters
 uv run python main.py --steps_per_em 1      # literal pseudocode: fresh Phi^(k-1) draw every SGD step
+
+uv run python pretrain.py --debug --no_wandb                     # ~seconds smoke test
+uv run python pretrain.py --digit_classes 3 7 --n_pretrain_images_per_class 4
+uv run python main.py --init_ckpt mnist_cryoem_checkpoints/pretrain_theta0.pt   # warm-started EM
 ```
 
-Key flags (see `main.py::parse_args` for the full list): `--n_em_steps`(K)
+Key `main.py` flags (see `main.py::parse_args` for the full list): `--n_em_steps`(K)
 `--steps_per_em`(T_tr) `--steps_first_em` `--sample_steps` (Euler steps for Φ)
 `--interpolant_style {linear,gvp}` (image branch only) `--pose_loss_weight`
-`--n_images` `--corruptions_per_image` `--noise_std` `--batch_size` `--lr` `--no_wandb`.
+`--digit_classes` (list, default: all 10) `--n_images_per_class` (PER class, not a total)
+`--init_ckpt` `--corruptions_per_image` `--noise_std` `--batch_size` `--lr` `--no_wandb`.
+
+Key `pretrain.py` flags (see `pretrain.py::parse_args`): `--digit_classes`
+`--n_pretrain_images_per_class` `--selection_strategy` `--n_steps` `--checkpoint_every`
+`--out_ckpt`, plus the same `--interpolant_style`/`--pose_loss_weight`/`--noise_std`/
+`--batch_size`/`--lr`/`--no_wandb` as `main.py`. `--digit_classes`/`--n_images_per_class` on
+`main.py` and `--digit_classes`/`--n_pretrain_images_per_class` on `pretrain.py` are
+independent — the pretraining pool is meant to be tiny, the EM problem's dataset is not.
 
 ## Conventions & gotchas (read before editing)
 
@@ -87,3 +105,15 @@ Key flags (see `main.py::parse_args` for the full list): `--n_em_steps`(K)
   passed to the model or used in `scsi.py`'s loss.
 - Gitignored ephemera: `mnist_cryoem_checkpoints/`, `mnist_cryoem_eval/`, `wandb/`,
   `__pycache__/`. Verify changes with `--debug --no_wandb` before a full run.
+- **The image branch's target is always the canonical (unrotated) digit — never a rotated
+  one.** This applies everywhere `x_hat`/`x1` is used as an interpolant target
+  (`scsi.py::train_mstep`, `pretrain.py`): the *pose* branch carries the rotation, and
+  `corruption.forward_channel(x_hat, theta=R_hat)` RE-APPLIES `R_hat` to reconstruct `y_hat`.
+  If the image target were already rotated, that reconstruction would double-rotate it —
+  silently wrong, no shape error, so it's easy to get backwards. `pretrain.py` in particular:
+  its GT images from `data.py` are left untouched; only a freshly-drawn `theta` is passed to
+  `forward_channel`, never `rotate_2d` applied to the image target itself.
+- **`--n_images_per_class`/`--n_pretrain_images_per_class` are PER CLASS, not totals**, and
+  `--digit_classes` defaults to all 10 MNIST classes on both `main.py` and `pretrain.py`. A
+  bare `uv run python main.py` therefore loads `2 * 10 = 20` GT digits by default, not 2 —
+  narrow with `--digit_classes 3` (etc.) to get a single-class run.

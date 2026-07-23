@@ -27,8 +27,15 @@ def parse_args():
         description="SCSI on a CryoEM-style 2D->1D MNIST channel "
                     "(random in-plane rotation + 1D projection + AWGN)"
     )
-    parser.add_argument("--n_images", type=int, default=2,
-                        help="Number of ground-truth MNIST digits to use")
+    parser.add_argument("--digit_classes", type=int, nargs="+", default=None,
+                        help="Which MNIST classes (0-9) to draw GT digits from "
+                             "(default: all 10 classes)")
+    parser.add_argument("--n_images_per_class", type=int, default=2,
+                        help="Number of ground-truth MNIST digits to use PER CLASS "
+                             "in --digit_classes")
+    parser.add_argument("--init_ckpt", type=str, default=None,
+                        help="Path to a pretrained state_dict (e.g. from pretrain.py) to "
+                             "load as Theta^(0) before the EM loop starts")
     parser.add_argument("--corruptions_per_image", type=int, default=200,
                         help="Number of independent corrupted observations per GT digit "
                              "(the channel is applied this many times per photo)")
@@ -66,7 +73,8 @@ if __name__ == "__main__":
         def _explicit(flag):
             return any(a == flag or a.startswith(flag + "=") for a in sys.argv)
 
-        if not _explicit("--n_images"):              args.n_images = 16
+        if not _explicit("--digit_classes"):          args.digit_classes = [0]
+        if not _explicit("--n_images_per_class"):     args.n_images_per_class = 16
         if not _explicit("--corruptions_per_image"): args.corruptions_per_image = 2
         if not _explicit("--n_em_steps"):             args.n_em_steps = 2
         if not _explicit("--steps_per_em"):           args.steps_per_em = 4
@@ -86,12 +94,13 @@ if __name__ == "__main__":
               f"generation is reused across {args.steps_per_em} SGD steps before refreshing")
 
     # ── Load dataset ─────────────────────────────────────────────────────
-    x_gt = load_mnist_subset(args.n_images)
+    x_gt = load_mnist_subset(args.n_images_per_class, digit_classes=args.digit_classes)
     y_obs, theta_star, image_idx = build_observations(
         x_gt, corruptions_per_image=args.corruptions_per_image, noise_std=args.noise_std,
     )
     N_obs = y_obs.size(0)
-    print(f"GT digits: {args.n_images}   observations: {N_obs} "
+    print(f"GT digits: {x_gt.size(0)} ({args.n_images_per_class} per class, "
+          f"classes={args.digit_classes or list(range(10))})   observations: {N_obs} "
           f"({args.corruptions_per_image} per digit)")
     print(f"GT  range=[{x_gt.min():.2f}, {x_gt.max():.2f}]")
     print(f"Obs range=[{y_obs.min():.2f}, {y_obs.max():.2f}]\n")
@@ -101,6 +110,9 @@ if __name__ == "__main__":
     # scsi.py::train_mstep docstring) — required for --steps_per_em as low as 1 to be a fair
     # test of the literal pseudocode rather than being crippled by constantly-reset Adam state.
     model = ConditionalVelocityCryoEM(image_size=IMAGE_SIZE).to(device)
+    if args.init_ckpt is not None:
+        model.load_state_dict(torch.load(args.init_ckpt, map_location=device))
+        print(f"Loaded initial teacher weights <- {args.init_ckpt}")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_params:,}\n")

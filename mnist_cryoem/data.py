@@ -1,15 +1,25 @@
 import torch
 import torchvision.transforms as transforms
 from torchvision import datasets
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from model import IMAGE_SIZE
 from corruption import forward_channel
 
 
-def load_mnist_subset(n_images: int, image_size: int = IMAGE_SIZE,
+def load_mnist_subset(n_images_per_class: int, image_size: int = IMAGE_SIZE,
+                      digit_classes: list[int] | None = None,
                       seed: int | None = None) -> torch.Tensor:
-    """Load a random subset of n_images MNIST training digits, normalized to [-1, 1]."""
+    """
+    Load n_images_per_class random MNIST training digits from EACH class in digit_classes,
+    normalized to [-1, 1], concatenated in digit_classes order.
+
+    Args:
+        n_images_per_class: how many images to draw per class (not a total count).
+        digit_classes: which MNIST classes (0-9) to draw from. None = all 10 classes.
+    """
+    if digit_classes is None:
+        digit_classes = list(range(10))
     transform = transforms.Compose([
         transforms.Resize(image_size),
         transforms.ToTensor(),
@@ -17,9 +27,15 @@ def load_mnist_subset(n_images: int, image_size: int = IMAGE_SIZE,
     ])
     dataset = datasets.MNIST("./data", train=True, download=True, transform=transform)
     generator = torch.Generator().manual_seed(seed) if seed is not None else None
-    loader = DataLoader(dataset, batch_size=n_images, shuffle=True, generator=generator)
-    x_gt, _ = next(iter(loader))  # (n_images, 1, image_size, image_size)
-    return x_gt
+
+    chunks = []
+    for digit_class in digit_classes:
+        class_idx = (dataset.targets == digit_class).nonzero(as_tuple=True)[0]
+        loader = DataLoader(Subset(dataset, class_idx), batch_size=n_images_per_class,
+                            shuffle=True, generator=generator)
+        x_c, _ = next(iter(loader))  # (n_images_per_class, 1, image_size, image_size)
+        chunks.append(x_c)
+    return torch.cat(chunks, dim=0)
 
 
 def build_observations(
