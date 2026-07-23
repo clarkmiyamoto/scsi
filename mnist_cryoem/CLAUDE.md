@@ -52,8 +52,9 @@ own section below — it deliberately does not reuse `scsi.py::train_mstep`.
 | `model.py` | `ConditionalDiT` (image branch, ported from `image_2d/model.py`), `PoseHead` (SO(2) branch, new to this codebase), `ConditionalVelocityCryoEM` (joint wrapper — owns the `y`-broadcast and `t_frac -> t_int` conversion). `IMAGE_SIZE`, `INTEGRATION_SCALE`. |
 | `corruption.py` | Forward channel `F`: `sample_uniform_angle` (Haar-uniform SO(2), literal `z~N(0,1)` direction), `rotate_2d` (black-fill in-plane rotation), `project_1d`, `forward_channel` (rotate → project → AWGN). |
 | `data.py` | `load_mnist_subset`, `build_observations` (applies `corruption.forward_channel` `corruptions_per_image` times per digit to build the observation set `mu`; keeps `theta_star` as a diagnostic-only ground truth, never fed to the model). |
-| `wandb_logging.py` | `log_train_step` (per-SGD-step scalars, extracted from `train_mstep`'s inner loop), `log_em_step` (4-row reconstruction panel + mean circular-error diagnostic). Degrades gracefully without wandb (`_WANDB_AVAILABLE`), same pattern as everywhere else in the repo. |
-| `main.py` | CLI (`argparse`), device autodetect, `--debug` tiny-run defaults, dataset load, model/optimizer construction, optional `--init_ckpt` load, `wandb.init`/`finish`, one call to `em.run_em_loop(...)`. |
+| `wandb_logging.py` | `log_train_step` (per-SGD-step scalars, extracted from `train_mstep`'s inner loop), `log_em_step` (4-row reconstruction panel + mean circular-error diagnostic), `log_overfit_step` (per-step loss/loss_image/loss_pose/grad_norm for `overfit.py`, no images). Degrades gracefully without wandb (`_WANDB_AVAILABLE`), same pattern as everywhere else in the repo. |
+| `main.py` | CLI (`argparse`), device autodetect, `--debug` tiny-run defaults, dataset load, model/optimizer construction, optional `--init_ckpt` load, `wandb.init`/`finish`, one call to `em.run_em_loop(...)`. Also owns `--overfit` dispatch (see `overfit.py`). |
+| `overfit.py` | **`--overfit` sanity check, not part of the SCSI algorithm.** `overfit_single_batch(model, x_batch, theta_batch, y_batch, ...)` — draws one fixed `(x_hat, theta_hat, y)` batch and runs many SGD steps of `scsi.py::loss_func_joint` against it with a throwaway optimizer, logging every step via `wandb_logging.log_overfit_step`. Only the interpolant's own randomness (`t`, `z_image`, `theta_z`) varies step to step, so the loss floor is the irreducible conditional variance, not zero — see the module docstring before reading a plateau as a bug. Dispatched from `main.py` right after model construction; exits before `run_em_loop` is ever called, so it never touches the real EM run. |
 | `pretrain.py` | **Supervised warm-start for `Theta^(0)`.** Flat stochastic-interpolant SGD loop (no outer/inner loop) directly on `scsi.py::loss_func_joint` — draws a fresh random rotation `R` per step, keeps the GT digit canonical, computes `y = corruption.forward_channel(x_i, theta=R)`. Pluggable pool selection via `SELECTION_STRATEGIES` (currently one entry, `per_class`, drawing `--n_pretrain_images_per_class` images from each of `--digit_classes`). Saves a `model.state_dict()` checkpoint that `main.py --init_ckpt` can load directly. |
 
 ## How to run
@@ -62,6 +63,7 @@ own section below — it deliberately does not reuse `scsi.py::train_mstep`.
 uv run python main.py --debug --no_wandb    # ~seconds smoke test, no wandb needed
 uv run python main.py                       # full run, default hyperparameters
 uv run python main.py --steps_per_em 1      # literal pseudocode: fresh Phi^(k-1) draw every SGD step
+uv run python main.py --overfit --no_wandb  # sanity check only: overfit one fixed batch, exit (no EM loop)
 
 uv run python pretrain.py --debug --no_wandb                     # ~seconds smoke test
 uv run python pretrain.py --digit_classes 3 7 --n_pretrain_images_per_class 4
@@ -72,7 +74,9 @@ Key `main.py` flags (see `main.py::parse_args` for the full list): `--n_em_steps
 `--steps_per_em`(T_tr) `--steps_first_em` `--sample_steps` (Euler steps for Φ)
 `--interpolant_style {linear,gvp}` (image branch only) `--pose_loss_weight`
 `--digit_classes` (list, default: all 10) `--n_images_per_class` (PER class, not a total)
-`--init_ckpt` `--corruptions_per_image` `--noise_std` `--batch_size` `--lr` `--no_wandb`.
+`--init_ckpt` `--corruptions_per_image` `--noise_std` `--batch_size` `--lr` `--no_wandb`
+`--overfit` (mode switch: run `overfit.py`'s single-batch sanity check and exit, skipping the
+EM loop entirely — batch is the first `min(--batch_size, len(x_gt))` GT digits) `--overfit_steps`.
 
 Key `pretrain.py` flags (see `pretrain.py::parse_args`): `--digit_classes`
 `--n_pretrain_images_per_class` `--selection_strategy` `--n_steps` `--checkpoint_every`

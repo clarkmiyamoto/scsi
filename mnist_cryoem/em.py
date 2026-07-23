@@ -60,5 +60,5 @@ def run_em_loop(
         log_em_step(
             x_gt, y_obs, theta_star, image_idx,
             x_pool, theta_pool, idx,
-            em_step=k, use_wandb=use_wandb,
+            em_step=k, wandb_step=global_step[0], use_wandb=use_wandb,
         )

@@ -9,7 +9,7 @@ from data import load_mnist_subset
 from model import ConditionalVelocityCryoEM, IMAGE_SIZE
 from corruption import forward_channel, sample_uniform_angle
 from scsi import loss_func_joint
-from wandb_logging import log_train_step
+from wandb_logging import log_train_step, log_pretrain_reconstruction
 
 try:
     import wandb
@@ -83,7 +83,7 @@ def parse_args():
                         help="How the pretraining pool {x_i} is chosen — see "
                              "SELECTION_STRATEGIES")
     parser.add_argument("--noise_std", type=float, default=1.0)
-    parser.add_argument("--n_steps", type=int, default=500,
+    parser.add_argument("--n_steps", type=int, default=5000,
                         help="Flat supervised SGD steps (no outer/inner loop)")
     parser.add_argument("--interpolant_style", type=str, default="linear",
                         choices=["linear", "gvp"])
@@ -93,6 +93,12 @@ def parse_args():
     parser.add_argument("--checkpoint_every", type=int, default=100,
                         help="Save a safety checkpoint every N steps (final state is always "
                              "saved too)")
+    parser.add_argument("--plot_every", type=int, default=100,
+                        help="Log a qualitative reconstruction panel to wandb every N steps "
+                             "(0 disables it; the final step always logs one)")
+    parser.add_argument("--sample_steps", type=int, default=50,
+                        help="Euler steps for the joint ODE used only by --plot_every's "
+                             "reconstruction panel (not used in training itself)")
     parser.add_argument("--out_ckpt", type=str,
                         default="mnist_cryoem_checkpoints/pretrain_theta0.pt")
     parser.add_argument("--no_wandb", action="store_true")
@@ -111,6 +117,8 @@ if __name__ == "__main__":
         if not _explicit("--n_steps"):                    args.n_steps = 8
         if not _explicit("--batch_size"):                 args.batch_size = 8
         if not _explicit("--checkpoint_every"):            args.checkpoint_every = 4
+        if not _explicit("--plot_every"):                  args.plot_every = 4
+        if not _explicit("--sample_steps"):                args.sample_steps = 5
 
     use_wandb = _WANDB_AVAILABLE and not args.no_wandb
     print(f"Device: {device}")
@@ -164,6 +172,18 @@ if __name__ == "__main__":
 
         if (step + 1) % args.checkpoint_every == 0:
             torch.save(model.state_dict(), out_ckpt)
+
+        if args.plot_every > 0 and (step + 1) % args.plot_every == 0:
+            log_pretrain_reconstruction(
+                model, image_pool, noise_std=args.noise_std,
+                sample_steps=args.sample_steps, step=step, use_wandb=use_wandb,
+            )
+
+    if args.plot_every > 0 and args.n_steps % args.plot_every != 0:
+        log_pretrain_reconstruction(
+            model, image_pool, noise_std=args.noise_std,
+            sample_steps=args.sample_steps, step=args.n_steps - 1, use_wandb=use_wandb,
+        )
 
     torch.save(model.state_dict(), out_ckpt)
     print(f"steps={args.n_steps}  loss_image={running_img / args.n_steps:.5f}"

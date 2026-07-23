@@ -4,7 +4,9 @@ import argparse
 from pathlib import Path
 
 from data import load_mnist_subset, build_observations
+from corruption import forward_channel, sample_uniform_angle
 from em import run_em_loop
+from overfit import overfit_single_batch
 from model import ConditionalVelocityCryoEM, IMAGE_SIZE
 
 try:
@@ -61,6 +63,12 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument("--debug", action="store_true", help="Tiny run: quick smoke test")
+    parser.add_argument("--overfit", action="store_true",
+                        help="Sanity check only: verify the model can overfit a single fixed "
+                             "batch (see overfit.py), log loss/grad_norm to wandb, then exit "
+                             "WITHOUT running the EM loop.")
+    parser.add_argument("--overfit_steps", type=int, default=1000,
+                        help="SGD steps for the --overfit check")
     return parser.parse_args()
 
 
@@ -81,6 +89,7 @@ if __name__ == "__main__":
         if not _explicit("--steps_first_em"):         args.steps_first_em = 4
         if not _explicit("--sample_steps"):           args.sample_steps = 5
         if not _explicit("--batch_size"):             args.batch_size = 8
+        if not _explicit("--overfit_steps"):          args.overfit_steps = 8
 
     steps_first_em = args.steps_first_em if args.steps_first_em is not None else args.steps_per_em
     use_wandb = _WANDB_AVAILABLE and not args.no_wandb
@@ -116,6 +125,32 @@ if __name__ == "__main__":
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_params:,}\n")
+
+    # ── --overfit: sanity check only, exits before the EM loop ──────────────
+    if args.overfit:
+        n_batch = min(args.batch_size, x_gt.size(0))
+        x_batch = x_gt[:n_batch].to(device)
+        theta_batch = sample_uniform_angle(n_batch, device)
+        y_batch, _ = forward_channel(x_batch, noise_std=args.noise_std, theta=theta_batch)
+        print(f"Overfit check: batch_size={n_batch}  steps={args.overfit_steps}")
+
+        if use_wandb:
+            wandb.init(
+                project="scsi-cryoem-mnist-overfit",
+                config=vars(args) | {"n_params": n_params, "batch_size": n_batch},
+            )
+
+        final_loss = overfit_single_batch(
+            model, x_batch, theta_batch, y_batch,
+            n_steps=args.overfit_steps, lr=args.lr,
+            style=args.interpolant_style, pose_loss_weight=args.pose_loss_weight,
+            use_wandb=use_wandb,
+        )
+        print(f"Overfit check done: final loss={final_loss:.5f}")
+
+        if use_wandb:
+            wandb.finish()
+        sys.exit(0)
 
     if use_wandb:
         wandb.init(
