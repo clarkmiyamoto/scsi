@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 
+from si import wrap_to_pi
+
 
 def sample_uniform_angle(B: int, device: torch.device | None = None) -> torch.Tensor:
     """
@@ -13,6 +15,29 @@ def sample_uniform_angle(B: int, device: torch.device | None = None) -> torch.Te
     z = torch.randn(B, 2, device=device)
     z = z / z.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     return torch.atan2(z[:, 1], z[:, 0])
+
+
+def sample_tilt_series_angles(
+    n_acquisitions: int, n_tilts: int, tilt_increment: float,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """
+    One CryoET-style tilt series per acquisition: T = n_tilts angles, evenly spaced by
+    `tilt_increment` radians, starting from an independent Haar-uniform random offset per
+    acquisition (so the dataset doesn't share one fixed set of absolute angles).
+
+    Args:
+        n_acquisitions: how many independent tilt series to draw (e.g. one GT object imaged
+            `corruptions_per_object` times is `corruptions_per_object` acquisitions).
+        n_tilts: T, number of tilts within one series.
+        tilt_increment: angular step between consecutive tilts, in radians.
+
+    Returns:
+        theta: (n_acquisitions, n_tilts) in (-pi, pi]
+    """
+    theta0 = sample_uniform_angle(n_acquisitions, device)                       # (n_acq,)
+    steps = torch.arange(n_tilts, device=device, dtype=theta0.dtype) * tilt_increment  # (T,)
+    return wrap_to_pi(theta0[:, None] + steps[None, :])                        # (n_acq, T)
 
 
 def rotate_2d(x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:

@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from si import wrap_to_pi
 from corruption import forward_channel, sample_uniform_angle
 from ode import sample_joint
+from model import IMAGE_SIZE
 
 try:
     import wandb
@@ -57,7 +58,7 @@ def log_pretrain_reconstruction(
     (ode.sample_joint, z ~ N(0,I) | y) -> (x_hat, theta_hat). Logs a 4-row panel (GT digit /
     Obs y / model x_hat / F(x_hat; theta_hat)) plus mean circular error |wrap(theta_hat -
     theta)| — here a real accuracy metric (pretrain.py has true GT rotations), unlike
-    log_em_step's pool-vs-pool circular error which is diagnostic-only.
+    log_em_pool_diagnostics's pool-vs-pool circular error which is diagnostic-only.
 
     sample_joint leaves the model in eval() mode (it doesn't restore it) — this function
     restores model.train() before returning so the caller's training loop is unaffected.
@@ -83,21 +84,29 @@ def log_pretrain_reconstruction(
     proj_strip = strip(proj_hat).cpu()
 
     vmin_img, vmax_img = -1.0, 1.0
-    all_1d = torch.cat([obs_strip.flatten(), proj_strip.flatten()])
-    vmin_1d, vmax_1d = float(all_1d.min()), float(all_1d.max())
-    if vmax_1d - vmin_1d < 1e-8:
-        vmax_1d = vmin_1d + 1e-8
 
+    # Each column gets its OWN vmin/vmax (over its Obs y + F(x_hat) pair only), not one shared
+    # scale across the whole panel. The projection's huge per-column background DC offset
+    # (~-H from summing H rows of -1 background) varies sample to sample and otherwise
+    # dominates a shared scale, crushing the much smaller rotation-dependent signal into a
+    # near-flat gray band — i.e. every column looks "the same" even though the underlying
+    # signals differ.
     rows = [
-        (x_gt[:, 0].cpu(), "GT digit", vmin_img, vmax_img),
-        (obs_strip, "Obs y", vmin_1d, vmax_1d),
-        (x_hat[:, 0].cpu(), "Model x_hat", vmin_img, vmax_img),
-        (proj_strip, "F(x_hat)", vmin_1d, vmax_1d),
+        (x_gt[:, 0].cpu(), "GT digit", "img"),
+        (obs_strip, "Obs y", "1d"),
+        (x_hat[:, 0].cpu(), "Model x_hat", "img"),
+        (proj_strip, "F(x_hat)", "1d"),
     ]
     fig, axes = plt.subplots(4, n, figsize=(2 * n, 8), squeeze=False)
-    for r, (data, label, vmin, vmax) in enumerate(rows):
+    for r, (_, label, _) in enumerate(rows):
         axes[r, 0].set_ylabel(label, fontsize=9)
-        for j in range(n):
+    for j in range(n):
+        lo = min(obs_strip[j].min().item(), proj_strip[j].min().item())
+        hi = max(obs_strip[j].max().item(), proj_strip[j].max().item())
+        if hi - lo < 1e-8:
+            hi = lo + 1e-8
+        for r, (data, _, kind) in enumerate(rows):
+            vmin, vmax = (vmin_img, vmax_img) if kind == "img" else (lo, hi)
             axes[r, j].imshow(data[j].numpy(), cmap="gray", vmin=vmin, vmax=vmax)
             axes[r, j].set_xticks([])
             axes[r, j].set_yticks([])
@@ -117,85 +126,160 @@ def log_pretrain_reconstruction(
     plt.close(fig)
 
 
-def log_em_step(
+def log_em_pool_diagnostics(
+    theta_pool: torch.Tensor,    # (n,)      this iteration's Phi^(k-1)-recovered rotations
+    theta_star: torch.Tensor,    # (N_obs,)  diagnostic only, never used in training
+    pool_indices: torch.Tensor,  # (n,) indices into theta_star for this iteration's pool
+    wandb_step: int,
+    use_wandb: bool,
+) -> None:
+    """
+    Scalar-only health diagnostic: mean circular error |wrap(theta_pool - theta_star)|
+    between the whole pool's Phi^(k-1)-recovered rotations and the true rotations for the
+    SAME sampled observations. Exploits the fact that we control data generation
+    (theta_star) — NOT a training signal, never fed back into the loss. Logged at
+    `wandb_step` (see log_train_step) for the same non-decreasing-step reason documented on
+    log_reconstruction_grid below.
+    """
+    if not use_wandb:
+        return
+    circ_err = wrap_to_pi(theta_pool - theta_star[pool_indices]).abs().mean().item()
+    wandb.log({"em/circular_error": circ_err}, step=wandb_step)
+
+
+@torch.no_grad()
+def log_reconstruction_grid(
+    model: nn.Module,
     x_gt: torch.Tensor,        # (n_images, 1, H, W)
     y_obs: torch.Tensor,       # (N_obs, 1, W)
     theta_star: torch.Tensor,  # (N_obs,)  diagnostic only, never used in training
     image_idx: torch.Tensor,   # (N_obs,)
-    x_pool: torch.Tensor,      # (n, 1, H, W)  this iteration's pool (subset of N_obs)
-    theta_pool: torch.Tensor,  # (n,)
-    pool_indices: torch.Tensor,  # (n,) indices into y_obs/theta_star/image_idx
+    acq_idx: torch.Tensor,     # (N_obs,)  which acquisition each observation belongs to
+    fixed_acq_id: int,
+    n_acq: int,
+    sample_steps: int,
     em_step: int,
     wandb_step: int,
     use_wandb: bool,
-    n: int = 6,
-):
+    device: torch.device,
+    n_problems: int = 6,
+    max_tilt_rows: int = 32,
+) -> None:
     """
-    4-row panel (n columns):
-      Row 0 — GT digit the pool sample's observation came from
-      Row 1 — observation y (rendered as a thin strip)
-      Row 2 — pool sample x_pool[i] (pi(k) reconstruction)
-      Row 3 — F(pool sample) re-projected 1D signal (consistency check, also a strip)
-    Plus a logged scalar: mean circular error |wrap(theta_pool - theta_star)| — a health
-    diagnostic exploiting the fact that we control data generation, NOT a training signal.
+    ONE 4-row panel, where each COLUMN is a different "problem" (a whole acquisition / tilt
+    series), not a different tilt — the previous per-tilt-column layout couldn't show more
+    than one acquisition at a time. Column 0 is always `fixed_acq_id` (tracked across the
+    whole run, so you can watch the same particle improve over EM steps); the remaining
+    columns are freshly re-randomized acquisitions each call (variety across digits/poses).
 
-    Logged at `wandb_step` (the same monotonically-increasing SGD-step counter used by
-    `log_train_step`), NOT `em_step` — wandb requires non-decreasing steps per run, and
-    `em_step` (0, 1, 2, ...) is far behind the counter `log_train_step` has already advanced
-    to by the time this fires. Logging at `step=em_step` doesn't error, but wandb silently
-    drops the whole history row (image included) since it regresses the step. `em_step` is
-    still used for the figure's title/filename, which have no such constraint.
+      Row 0 — GT digit (single canonical image, one per problem)
+      Row 1 — the acquisition's real observations, STACKED into one (T, W) sinogram-style
+              image (T = n_tilts, rows = tilt index, columns = projection position) instead
+              of spread across sub-columns — this is what actually shows the tilt-series
+              structure --n_tilts/--corruptions_per_object/--tilt_increment_deg control.
+      Row 2 — ONE generated sample x_hat, conditioned on that acquisition's MIDDLE tilt's
+              observation (the model only ever conditions on a single y; there's no joint
+              multi-tilt conditioning to fall back on, so one representative tilt is chosen).
+      Row 3 — that SAME x_hat re-projected (F, noise_std=0) at every tilt's TRUE angle,
+              stacked into another (T, W) sinogram — directly comparable to Row 1. This
+              isolates "is the reconstructed image right" from "is the recovered pose
+              right" (the latter already has its own diagnostic in log_em_pool_diagnostics)
+              by reprojecting at the known true angles rather than a recovered one.
+    Column titles show the conditioning tilt's true vs. recovered angle in degrees.
+
+    Runs its own small E-step (ode.sample_joint) directly rather than reusing
+    scsi.py::propose_estep: scsi.py already imports from this module (log_train_step), so
+    importing scsi.py back here would be circular. sample_joint sets model.eval() internally
+    each call but never restores it — model.train() is restored once at the end.
+
+    Logged at `wandb_step`, NOT `em_step` — see log_train_step for why (wandb requires
+    non-decreasing steps per run).
     """
-    n = min(n, x_pool.size(0))
-    sel = pool_indices[:n]
-    gt_imgs = x_gt[image_idx[sel]]
-    obs = y_obs[sel]
-    pool_imgs = x_pool[:n]
-    theta_p = theta_pool[:n]
-    theta_s = theta_star[sel]
+    other_ids = torch.randperm(n_acq)
+    other_ids = other_ids[other_ids != fixed_acq_id][:n_problems - 1]
+    acq_ids = [fixed_acq_id] + other_ids.tolist()
+    n = len(acq_ids)
 
-    with torch.no_grad():
-        pool_proj, _ = forward_channel(pool_imgs, noise_std=0.0, theta=theta_p)
+    gt_imgs, obs_sinos, gen_imgs, recorrupt_sinos, col_titles = [], [], [], [], []
 
-    circ_err = wrap_to_pi(theta_pool - theta_star[pool_indices]).abs().mean().item()
+    for a in acq_ids:
+        mask = acq_idx == a
+        y_acq = y_obs[mask]
+        theta_star_acq = theta_star[mask]
+        img_idx = image_idx[mask][0].item()
+        T = y_acq.size(0)
 
-    def strip(y_1d, height=6):
-        # (n, 1, W) -> (n, height, W) for imshow
-        return y_1d[:, 0, :].unsqueeze(1).expand(-1, height, -1)
+        if T > max_tilt_rows:
+            rsel = torch.linspace(0, T - 1, max_tilt_rows).round().long()
+            y_acq = y_acq[rsel]
+            theta_star_acq = theta_star_acq[rsel]
+            T = max_tilt_rows
 
-    obs_strip = strip(obs).cpu()
-    proj_strip = strip(pool_proj).cpu()
+        cond_i = T // 2
+        z_image = torch.randn(1, 1, IMAGE_SIZE, IMAGE_SIZE, device=device)
+        x_hat, theta_hat = sample_joint(
+            model, z_image, y_acq[cond_i:cond_i + 1].to(device), n_steps=sample_steps,
+        )
 
-    vmin_img, vmax_img = -1.0, 1.0
-    all_1d = torch.cat([obs_strip.flatten(), proj_strip.flatten()])
-    vmin_1d, vmax_1d = float(all_1d.min()), float(all_1d.max())
-    if vmax_1d - vmin_1d < 1e-8:
-        vmax_1d = vmin_1d + 1e-8
+        recorrupt, _ = forward_channel(
+            x_hat.expand(T, -1, -1, -1).contiguous(), noise_std=0.0,
+            theta=theta_star_acq.to(device),
+        )  # (T, 1, W): the SAME single x_hat reprojected at every tilt's true angle
 
-    rows = [
-        (gt_imgs[:, 0].cpu(), "GT digit", vmin_img, vmax_img),
-        (obs_strip, "Obs y", vmin_1d, vmax_1d),
-        (pool_imgs[:, 0].cpu(), f"pi({em_step})", vmin_img, vmax_img),
-        (proj_strip, "F(pool)", vmin_1d, vmax_1d),
-    ]
-    fig, axes = plt.subplots(4, n, figsize=(2 * n, 8), squeeze=False)
-    for r, (data, label, vmin, vmax) in enumerate(rows):
+        gt_imgs.append(x_gt[img_idx, 0].cpu())
+        obs_sinos.append(y_acq[:, 0, :].cpu())            # (T, W)
+        gen_imgs.append(x_hat[0, 0].cpu())
+        recorrupt_sinos.append(recorrupt[:, 0, :].cpu())  # (T, W)
+
+        true_deg = theta_star_acq[cond_i].item() * 180.0 / torch.pi
+        rec_deg = theta_hat[0].item() * 180.0 / torch.pi
+        tag = " (fixed)" if a == fixed_acq_id else ""
+        col_titles.append(f"acq={a}{tag}\ncond θ: true {true_deg:.0f}° rec {rec_deg:.0f}°")
+
+    model.train()
+
+    fig, axes = plt.subplots(4, n, figsize=(2.4 * n, 9), squeeze=False)
+    row_labels = ["GT digit", f"Obs y ({T} tilts)", f"pi({em_step}) sample",
+                  "Recorrupt (true θ)"]
+    for r, label in enumerate(row_labels):
         axes[r, 0].set_ylabel(label, fontsize=9)
-        for j in range(n):
-            axes[r, j].imshow(data[j].numpy(), cmap="gray", vmin=vmin, vmax=vmax)
+
+    # Each column gets its own vmin/vmax, shared within a row PAIR — (Obs y, Recorrupt) get
+    # one scale, (GT digit, pi(k) sample) get another — rather than one scale across the
+    # whole panel, so an out-of-range/undertrained pi(k) sample doesn't wash out under a
+    # scale fixed to GT's [-1,1], and so the two members of each pair stay directly
+    # comparable to each other (see log_pretrain_reconstruction for the shared-scale pitfall
+    # this avoids).
+    for j in range(n):
+        sino_lo = min(obs_sinos[j].min().item(), recorrupt_sinos[j].min().item())
+        sino_hi = max(obs_sinos[j].max().item(), recorrupt_sinos[j].max().item())
+        if sino_hi - sino_lo < 1e-8:
+            sino_hi = sino_lo + 1e-8
+
+        img_lo = min(gt_imgs[j].min().item(), gen_imgs[j].min().item())
+        img_hi = max(gt_imgs[j].max().item(), gen_imgs[j].max().item())
+        if img_hi - img_lo < 1e-8:
+            img_hi = img_lo + 1e-8
+
+        axes[0, j].imshow(gt_imgs[j].numpy(), cmap="gray", vmin=img_lo, vmax=img_hi)
+        axes[1, j].imshow(obs_sinos[j].numpy(), cmap="gray", vmin=sino_lo, vmax=sino_hi,
+                          aspect="auto")
+        axes[2, j].imshow(gen_imgs[j].numpy(), cmap="gray", vmin=img_lo, vmax=img_hi)
+        axes[3, j].imshow(recorrupt_sinos[j].numpy(), cmap="gray", vmin=sino_lo, vmax=sino_hi,
+                          aspect="auto")
+        axes[0, j].set_title(col_titles[j], fontsize=7)
+        for r in range(4):
             axes[r, j].set_xticks([])
             axes[r, j].set_yticks([])
 
-    fig.suptitle(f"EM step {em_step}  |  mean circular error={circ_err:.3f} rad (diagnostic)",
-                fontsize=11)
+    fig.suptitle(f"em/reconstruction  |  EM step {em_step}", fontsize=11)
     plt.tight_layout()
 
     if use_wandb:
-        wandb.log({"em/reconstruction": wandb.Image(fig),
-                  "em/circular_error": circ_err}, step=wandb_step)
+        wandb.log({"em/reconstruction": wandb.Image(fig)}, step=wandb_step)
     else:
         from pathlib import Path
         out = Path("mnist_cryoem_eval")
         out.mkdir(exist_ok=True)
-        fig.savefig(out / f"em_step_{em_step:04d}.png", dpi=100, bbox_inches="tight")
+        fig.savefig(out / f"em_reconstruction_{em_step:04d}.png", dpi=100, bbox_inches="tight")
     plt.close(fig)

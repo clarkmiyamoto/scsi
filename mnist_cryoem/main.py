@@ -29,19 +29,31 @@ def parse_args():
         description="SCSI on a CryoEM-style 2D->1D MNIST channel "
                     "(random in-plane rotation + 1D projection + AWGN)"
     )
+    # Dataset / channel
     parser.add_argument("--digit_classes", type=int, nargs="+", default=None,
                         help="Which MNIST classes (0-9) to draw GT digits from "
                              "(default: all 10 classes)")
     parser.add_argument("--n_images_per_class", type=int, default=2,
                         help="Number of ground-truth MNIST digits to use PER CLASS "
                              "in --digit_classes")
+    parser.add_argument("--corruptions_per_object", type=int, default=200,
+                        help="Number of independent tilt-series ACQUISITIONS per GT object "
+                             "(F_CryoET is applied this many times per object; each "
+                             "application draws its own random tilt-series start offset)")
+    parser.add_argument("--n_tilts", type=int, default=16,
+                        help="T: number of tilts (1D projections) per acquisition's tilt "
+                             "series, at angles evenly spaced by --tilt_increment_deg from "
+                             "that acquisition's random start offset. Default 1 reproduces "
+                             "the old single-random-rotation-per-observation behavior.")
+    parser.add_argument("--tilt_increment_deg", type=float, default=7.5,
+                        help="Degrees between consecutive tilts within one acquisition's "
+                             "series (unused when --n_tilts=1)")
+    parser.add_argument("--noise_std", type=float, default=3.0)
+
+    # EM Loop
     parser.add_argument("--init_ckpt", type=str, default=None,
-                        help="Path to a pretrained state_dict (e.g. from pretrain.py) to "
-                             "load as Theta^(0) before the EM loop starts")
-    parser.add_argument("--corruptions_per_image", type=int, default=200,
-                        help="Number of independent corrupted observations per GT digit "
-                             "(the channel is applied this many times per photo)")
-    parser.add_argument("--noise_std", type=float, default=1.0)
+                            help="Path to a pretrained state_dict (e.g. from pretrain.py) to "
+                                 "load as Theta^(0) before the EM loop starts")
     parser.add_argument("--n_em_steps", type=int, default=200,
                         help="K: number of outer EM iterations")
     parser.add_argument("--steps_per_em", type=int, default=200,
@@ -52,15 +64,19 @@ def parse_args():
     parser.add_argument("--steps_first_em", type=int, default=None,
                         help="Override --steps_per_em for EM iteration 0 only "
                              "(default: same as --steps_per_em)")
+    parser.add_argument("--sample_steps", type=int, default=50,
+                            help="Euler steps for the joint ODE (Phi) in the E-step")
+
+    # Stochastic Interpolant / Training
     parser.add_argument("--interpolant_style", type=str, default="linear",
                         choices=["linear", "gvp"],
                         help="Image branch only — the pose branch always uses a geodesic "
                              "(constant angular velocity) schedule")
     parser.add_argument("--pose_loss_weight", type=float, default=1.0)
-    parser.add_argument("--sample_steps", type=int, default=50,
-                        help="Euler steps for the joint ODE (Phi) in the E-step")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
+
+    # Etc.
     parser.add_argument("--no_wandb", action="store_true")
     parser.add_argument("--debug", action="store_true", help="Tiny run: quick smoke test")
     parser.add_argument("--overfit", action="store_true",
@@ -83,7 +99,7 @@ if __name__ == "__main__":
 
         if not _explicit("--digit_classes"):          args.digit_classes = [0]
         if not _explicit("--n_images_per_class"):     args.n_images_per_class = 16
-        if not _explicit("--corruptions_per_image"): args.corruptions_per_image = 2
+        if not _explicit("--corruptions_per_object"): args.corruptions_per_object = 2
         if not _explicit("--n_em_steps"):             args.n_em_steps = 2
         if not _explicit("--steps_per_em"):           args.steps_per_em = 4
         if not _explicit("--steps_first_em"):         args.steps_first_em = 4
@@ -104,13 +120,15 @@ if __name__ == "__main__":
 
     # ── Load dataset ─────────────────────────────────────────────────────
     x_gt = load_mnist_subset(args.n_images_per_class, digit_classes=args.digit_classes)
-    y_obs, theta_star, image_idx = build_observations(
-        x_gt, corruptions_per_image=args.corruptions_per_image, noise_std=args.noise_std,
+    y_obs, theta_star, image_idx, acq_idx = build_observations(
+        x_gt, corruptions_per_object=args.corruptions_per_object,
+        n_tilts=args.n_tilts, tilt_increment_deg=args.tilt_increment_deg,
+        noise_std=args.noise_std,
     )
     N_obs = y_obs.size(0)
     print(f"GT digits: {x_gt.size(0)} ({args.n_images_per_class} per class, "
           f"classes={args.digit_classes or list(range(10))})   observations: {N_obs} "
-          f"({args.corruptions_per_image} per digit)")
+          f"({args.corruptions_per_object} acquisitions x {args.n_tilts} tilts per digit)")
     print(f"GT  range=[{x_gt.min():.2f}, {x_gt.max():.2f}]")
     print(f"Obs range=[{y_obs.min():.2f}, {y_obs.max():.2f}]\n")
 
@@ -164,7 +182,7 @@ if __name__ == "__main__":
     ckpt_dir.mkdir(exist_ok=True)
 
     run_em_loop(
-        model, opt, y_obs, x_gt, theta_star, image_idx,
+        model, opt, y_obs, x_gt, theta_star, image_idx, acq_idx,
         args=args, device=device, use_wandb=use_wandb, ckpt_dir=ckpt_dir,
     )
 

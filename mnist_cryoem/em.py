@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from scsi import sample_pool_indices, propose_estep, train_mstep
-from wandb_logging import log_em_step
+from wandb_logging import log_em_pool_diagnostics, log_reconstruction_grid
 
 ########################################################
 # The outer EM loop: for k = 1..K, run one E-step then one M-step (scsi.py), so that
@@ -21,12 +21,15 @@ def run_em_loop(
     x_gt: torch.Tensor,        # (n_images, 1, H, W)  diagnostic only, for wandb panels
     theta_star: torch.Tensor,  # (N_obs,)             diagnostic only
     image_idx: torch.Tensor,   # (N_obs,)             diagnostic only
+    acq_idx: torch.Tensor,     # (N_obs,)             diagnostic only, groups tilt series
     args: argparse.Namespace,
     device: torch.device,
     use_wandb: bool,
     ckpt_dir: Path,
 ) -> None:
     N_obs = y_obs.size(0)
+    n_acq = int(acq_idx.max().item()) + 1
+    fixed_acq_id = 0  # tracked for the whole run so its reconstruction is comparable over time
     steps_first_em = args.steps_first_em if args.steps_first_em is not None else args.steps_per_em
     global_step = [0]
 
@@ -46,6 +49,14 @@ def run_em_loop(
             method="euler", device=device,
         )
 
+        # Visualization only, using this same Phi^(k-1) snapshot (before train_mstep updates
+        # the weights) so every diagnostic for iteration k reflects one consistent model.
+        log_reconstruction_grid(
+            model, x_gt, y_obs, theta_star, image_idx, acq_idx,
+            fixed_acq_id=fixed_acq_id, n_acq=n_acq, sample_steps=args.sample_steps,
+            em_step=k, wandb_step=global_step[0], use_wandb=use_wandb, device=device,
+        )
+
         train_mstep(
             model, opt, x_pool, theta_pool,
             noise_std=args.noise_std, style=args.interpolant_style,
@@ -57,8 +68,7 @@ def run_em_loop(
         torch.save(model.state_dict(), ckpt_dir / f"model_em{k:04d}.pt")
         print(f"  checkpoint saved  ->  {ckpt_dir}/model_em{k:04d}.pt")
 
-        log_em_step(
-            x_gt, y_obs, theta_star, image_idx,
-            x_pool, theta_pool, idx,
-            em_step=k, wandb_step=global_step[0], use_wandb=use_wandb,
+        log_em_pool_diagnostics(
+            theta_pool, theta_star, idx,
+            wandb_step=global_step[0], use_wandb=use_wandb,
         )
