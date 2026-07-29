@@ -1,4 +1,4 @@
-from diffusers import DiTTransformer2DModel
+from diffusers import DiTTransformer2DModel, UNet2DModel
 import torch
 import torch.nn as nn
 
@@ -38,6 +38,39 @@ class ConditionalDiT(nn.Module):
         inp = torch.cat([x_t, y_broadcast], dim=1)
         dummy = torch.zeros(x_t.size(0), dtype=torch.long, device=x_t.device)
         return self.dit(inp, timestep=t_int, class_labels=dummy).sample
+
+
+class ConditionalUNet2D(nn.Module):
+    """
+    Image branch alternative to ConditionalDiT, using diffusers' UNet2DModel. Same interface
+    (forward signature, in/out channel counts) so it's a drop-in swap in
+    ConditionalVelocityCryoEM — see the `arch` argument there.
+
+    Input:  cat([I_t^x, y_broadcast], dim=1)  ->  2 channels
+    Output: velocity prediction v_x            ->  1 channel
+    """
+    def __init__(self, image_size=IMAGE_SIZE,
+                 block_out_channels=(64, 128, 128, 256),
+                 layers_per_block=2, norm_num_groups=8):
+        super().__init__()
+        self.unet = UNet2DModel(
+            sample_size=image_size,
+            in_channels=2,
+            out_channels=1,
+            layers_per_block=layers_per_block,
+            block_out_channels=block_out_channels,
+            down_block_types=tuple("DownBlock2D" for _ in block_out_channels),
+            up_block_types=tuple("UpBlock2D" for _ in block_out_channels),
+            norm_num_groups=norm_num_groups,
+        )
+
+    def forward(self, x_t: torch.Tensor, t_int: torch.Tensor,
+                y_broadcast: torch.Tensor) -> torch.Tensor:
+        # x_t:         (B, 1, H, W)  interpolated image state I_t^x
+        # t_int:       (B,)          integer in [0, INTEGRATION_SCALE]
+        # y_broadcast: (B, 1, H, W)  1D observation tiled across rows
+        inp = torch.cat([x_t, y_broadcast], dim=1)
+        return self.unet(inp, timestep=t_int).sample
 
 
 class PoseHead(nn.Module):
@@ -90,10 +123,15 @@ class ConditionalVelocityCryoEM(nn.Module):
     y-broadcast and the t-fraction -> t_int conversion so si.py stays agnostic to how the two
     branches consume time/conditioning.
     """
-    def __init__(self, image_size=IMAGE_SIZE):
+    def __init__(self, image_size=IMAGE_SIZE, arch: str = "dit"):
         super().__init__()
         self.image_size = image_size
-        self.image_branch = ConditionalDiT(image_size=image_size)
+        if arch == "dit":
+            self.image_branch = ConditionalDiT(image_size=image_size)
+        elif arch == "unet":
+            self.image_branch = ConditionalUNet2D(image_size=image_size)
+        else:
+            raise ValueError(f"Unknown arch: {arch!r}. Choose 'dit' or 'unet'.")
         self.pose_branch = PoseHead(image_size=image_size)
 
     def forward(self, x_t: torch.Tensor, theta_t: torch.Tensor,

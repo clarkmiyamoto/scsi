@@ -67,6 +67,11 @@ def parse_args():
     parser.add_argument("--sample_steps", type=int, default=50,
                             help="Euler steps for the joint ODE (Phi) in the E-step")
 
+    # Model
+    parser.add_argument("--arch", type=str, default="dit", choices=["dit", "unet"],
+                        help="Image branch architecture: DiTTransformer2DModel or "
+                             "UNet2DModel (both from diffusers)")
+
     # Stochastic Interpolant / Training
     parser.add_argument("--interpolant_style", type=str, default="linear",
                         choices=["linear", "gvp"],
@@ -136,7 +141,7 @@ if __name__ == "__main__":
     # The optimizer is created once and persists across every EM outer iteration (see
     # scsi.py::train_mstep docstring) — required for --steps_per_em as low as 1 to be a fair
     # test of the literal pseudocode rather than being crippled by constantly-reset Adam state.
-    model = ConditionalVelocityCryoEM(image_size=IMAGE_SIZE).to(device)
+    model = ConditionalVelocityCryoEM(image_size=IMAGE_SIZE, arch=args.arch).to(device)
     if args.init_ckpt is not None:
         model.load_state_dict(torch.load(args.init_ckpt, map_location=device))
         print(f"Loaded initial teacher weights <- {args.init_ckpt}")
