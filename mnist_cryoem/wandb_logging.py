@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib
@@ -296,6 +297,44 @@ def log_reconstruction_grid(
 #     mosaics / horizontal strips (see log_reconstruction_grid_3d's docstring).
 ########################################################
 
+def _volume_to_pointcloud(
+    vol: torch.Tensor, keep_frac: float = 0.08, cmap_name: str = "inferno",
+    max_points: int = 6000,
+) -> np.ndarray:
+    """
+    (D, H, W) volume -> (N, 6) numpy point cloud [x y z r g b] for wandb.Object3D — wandb's
+    native 3D viewer, orbit/zoom/rotate directly in the browser (vs. the flat xy|xz|yz
+    projections _projection_mosaic makes). Keeps the top `keep_frac` of THIS volume's OWN
+    voxels by value (a per-volume quantile, not a fixed cutoff): x_hat has no guaranteed
+    range, so a fixed threshold either empties the cloud or fills the whole cube depending on
+    how (mis)calibrated the current model happens to be — same shared-scale pitfall documented
+    on log_pretrain_reconstruction, one level more dangerous here since a saturated cloud
+    silently degrades into confetti after the max_points subsample below. An
+    untrained/undertrained model legitimately renders as a noisy point cloud under this
+    scheme — that's the diagnostic, not a bug to threshold away. Voxel value maps to point
+    color via cmap_name. Subsamples uniformly past max_points (wandb's browser viewer bogs
+    down well before tens of thousands of points).
+    """
+    vol = vol.detach().float().cpu()
+    cutoff = torch.quantile(vol.reshape(-1), 1.0 - keep_frac).item()
+    mask = vol > cutoff
+    coords = mask.nonzero(as_tuple=False).float()
+    values = vol[mask]
+
+    if coords.size(0) > max_points:
+        sel = torch.randperm(coords.size(0))[:max_points]
+        coords, values = coords[sel], values[sel]
+
+    lo, hi = values.min().item(), values.max().item()
+    norm = ((values - lo) / max(hi - lo, 1e-8)).numpy()
+    rgb = matplotlib.colormaps[cmap_name](norm)[:, :3] * 255.0
+
+    center = (torch.tensor(vol.shape, dtype=torch.float32) - 1) / 2
+    coords = (coords - center).numpy()
+
+    return np.concatenate([coords, rgb], axis=1).astype(np.float32)
+
+
 def _projection_mosaic(x: torch.Tensor) -> torch.Tensor:
     """
     (B, 1, D, H, W) -> (B, H, 3W): xy|xz|yz sum-projections concatenated horizontally.
@@ -325,7 +364,15 @@ def log_pretrain_reconstruction_3d(
     E-step integrator (ode.sample_joint_3d, z ~ N(0,I) | y) -> (x_hat, pose_hat). Logs a 4-row
     panel (GT xy|xz|yz mosaic / Obs y / model x_hat's mosaic / F(x_hat) recorrupted) plus mean
     geodesic error — here a real accuracy metric (pretrain_3d.py has true GT rotations), unlike
-    log_em_pool_diagnostics_3d's pool-vs-pool error which is diagnostic-only.
+    log_em_pool_diagnostics_3d's pool-vs-pool error which is diagnostic-only. ALSO logs an
+    interactive companion for the SAME x_hat batch (no second sample_joint_3d call — reusing
+    the mosaic panel's x_hat keeps the two views cross-referencable and avoids doubling the
+    3D-UNet-pass cost): one wandb.Object3D point cloud per example, all under one key so
+    wandb's media panel renders them as a steppable, individually-orbitable gallery — see
+    _volume_to_pointcloud for the per-volume quantile thresholding this relies on. GT volumes
+    are intentionally NOT logged as point clouds (the static mosaic already carries that
+    comparison, and GT never changes call to call, so re-uploading it every --plot_every would
+    be pure upload-budget waste — see _volume_to_pointcloud's docstring on cost).
 
     sample_joint_3d leaves the model in eval() mode (it doesn't restore it) — this function
     restores model.train() before returning so the caller's training loop is unaffected.
@@ -375,9 +422,16 @@ def log_pretrain_reconstruction_3d(
                 fontsize=11)
     plt.tight_layout()
 
+    # Built unconditionally (not gated on use_wandb) so `--debug --no_wandb` still exercises
+    # this code path — see _volume_to_pointcloud's docstring for why the threshold is
+    # per-volume rather than fixed.
+    gen_clouds = [_volume_to_pointcloud(x_hat[i, 0]) for i in range(n)]
+
     if use_wandb:
         wandb.log({"pretrain/reconstruction": wandb.Image(fig),
-                  "pretrain/geodesic_error": geo_err}, step=step)
+                  "pretrain/geodesic_error": geo_err,
+                  "pretrain/generations_3d": [wandb.Object3D(c) for c in gen_clouds]},
+                 step=step)
     else:
         from pathlib import Path
         out = Path("mnist_cryoet_eval")
@@ -440,13 +494,22 @@ def log_reconstruction_grid_3d(
 
     Runs its own small E-step (ode.sample_joint_3d) directly rather than reusing
     scsi.py::propose_estep_3d — same circular-import reasoning as log_reconstruction_grid.
+
+    ALSO logs an interactive companion for the SAME per-problem x_hat computed above (no
+    second sample_joint_3d call): one wandb.Object3D point cloud per problem, all under one
+    key so wandb's media panel renders a steppable, individually-orbitable gallery you can
+    rotate/zoom directly in the browser — see _volume_to_pointcloud for the per-volume
+    quantile thresholding this relies on. GT volumes are intentionally NOT logged as point
+    clouds here — the static mosaic already carries that comparison, and re-uploading a GT
+    volume every EM step would be pure upload-budget waste since it never changes.
     """
     other_ids = torch.randperm(n_acq)
     other_ids = other_ids[other_ids != fixed_acq_id][:n_problems - 1]
     acq_ids = [fixed_acq_id] + other_ids.tolist()
     n = len(acq_ids)
 
-    gt_mosaics, obs_strips, gen_mosaics, recorrupt_strips, col_titles = [], [], [], [], []
+    gt_mosaics, obs_strips, gen_mosaics, gen_volumes, recorrupt_strips, col_titles = (
+        [], [], [], [], [], [])
     T = n_tilt_preview
 
     for a in acq_ids:
@@ -476,6 +539,7 @@ def log_reconstruction_grid_3d(
         gt_mosaics.append(_projection_mosaic(x_gt[img_idx:img_idx + 1]).cpu()[0])  # (H, 3W)
         obs_strips.append(torch.cat(list(y_acq[:, 0]), dim=-1).cpu())             # (H, T*W)
         gen_mosaics.append(_projection_mosaic(x_hat).cpu()[0])                     # (H, 3W)
+        gen_volumes.append(x_hat[0, 0].cpu())                                      # (D, H, W)
         recorrupt_strips.append(torch.cat(list(recorrupt[:, 0]), dim=-1).cpu())   # (H, T*W)
 
         R_hat = gram_schmidt_to_matrix(pose_hat)
@@ -520,8 +584,15 @@ def log_reconstruction_grid_3d(
     fig.suptitle(f"em/reconstruction  |  EM step {em_step}", fontsize=11)
     plt.tight_layout()
 
+    # Built unconditionally (not gated on use_wandb) so `--debug --no_wandb` still exercises
+    # this code path — see _volume_to_pointcloud's docstring for why the threshold is
+    # per-volume rather than fixed.
+    gen_clouds = [_volume_to_pointcloud(v) for v in gen_volumes]
+
     if use_wandb:
-        wandb.log({"em/reconstruction": wandb.Image(fig)}, step=wandb_step)
+        wandb.log({"em/reconstruction": wandb.Image(fig),
+                  "em/generations_3d": [wandb.Object3D(c) for c in gen_clouds]},
+                 step=wandb_step)
     else:
         from pathlib import Path
         out = Path("mnist_cryoet_eval")
