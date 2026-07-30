@@ -3,8 +3,12 @@ import torchvision.transforms as transforms
 from torchvision import datasets
 from torch.utils.data import DataLoader, Subset
 
-from model import IMAGE_SIZE
-from corruption import forward_channel, sample_tilt_series_angles
+from model import IMAGE_SIZE, VOL_SIZE
+from corruption import (
+    forward_channel, sample_tilt_series_angles,
+    forward_channel_3d, sample_tilt_series_rotations_so3,
+)
+from si import matrix_to_gram_schmidt
 
 
 def load_mnist_subset(n_images_per_class: int, image_size: int = IMAGE_SIZE,
@@ -89,3 +93,103 @@ def build_observations(
     image_idx = torch.arange(n_images).repeat_interleave(corruptions_per_object * n_tilts)
     acq_idx = torch.arange(n_acq).repeat_interleave(n_tilts)
     return y_obs, theta_star, image_idx, acq_idx
+
+
+def load_mnist_volumes_3d(n_images_per_class: int, vol_size: int = VOL_SIZE,
+                          inplane_size: int | None = None,
+                          depth_extent: int | None = None,
+                          digit_classes: list[int] | None = None,
+                          seed: int | None = None) -> torch.Tensor:
+    """
+    Build R^{p^3} MNIST volumes by extruding each 2D digit uniformly across a central depth
+    band, leaving empty (-1) space at the boundary of ALL THREE axes so a generic SO(3) rotation
+    doesn't clip the object against the cube's corners — a 90-degree rotation swaps depth extent
+    into in-plane extent, so depth-only margin would not be enough on its own. Binding
+    constraint: with in-plane ink radius r_xy and half-depth extent d, need
+    sqrt(r_xy^2 + d^2) <= vol_size/2 - eps. `inplane_size`/`depth_extent` defaults below are a
+    starting point for that constraint, not a guarantee — gated by the mass-invariance check in
+    test_so3_math.py.
+
+    Args:
+        n_images_per_class: how many images to draw per class (not a total count).
+        vol_size: p, the cube's side length.
+        inplane_size: MNIST digit is loaded at THIS resolution (default: round(vol_size*0.65))
+            before being zero-padded (to background -1, not literal zero) up to vol_size in H,W.
+        depth_extent: thickness (in voxels) of the depth band the digit is extruded across,
+            centered in D (default: round(vol_size*0.25) — a thin tablet, not a long bar;
+            also closer to real cryoEM specimen geometry, thin relative to lateral extent).
+        digit_classes: which MNIST classes (0-9) to draw from. None = all 10 classes.
+
+    Returns:
+        (N, 1, vol_size, vol_size, vol_size) in [-1, 1], background -1.
+    """
+    if inplane_size is None:
+        inplane_size = round(vol_size * 0.65)
+    if depth_extent is None:
+        depth_extent = round(vol_size * 0.25)
+
+    x2d = load_mnist_subset(n_images_per_class, image_size=inplane_size,
+                            digit_classes=digit_classes, seed=seed)  # (N, 1, s, s) in [-1, 1]
+    N = x2d.size(0)
+
+    pad_total = vol_size - inplane_size
+    pad_lo = pad_total // 2
+    pad_hi = pad_total - pad_lo
+    x2d_padded = torch.nn.functional.pad(x2d, (pad_lo, pad_hi, pad_lo, pad_hi), value=-1.0)
+    # (N, 1, vol_size, vol_size)
+
+    margin = (vol_size - depth_extent) // 2
+    vol = torch.full((N, 1, vol_size, vol_size, vol_size), -1.0, dtype=x2d.dtype)
+    vol[:, :, margin:margin + depth_extent] = x2d_padded.unsqueeze(2).expand(
+        -1, -1, depth_extent, -1, -1)
+    return vol
+
+
+def build_observations_3d(
+    x_gt: torch.Tensor,
+    corruptions_per_object: int,
+    n_tilts: int,
+    tilt_increment_deg: float,
+    noise_std: float,
+    tilt_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    3D/CryoET analogue of build_observations: applies forward_channel_3d to each GT volume
+    `corruptions_per_object` times, each repetition an independent tilt-series acquisition of
+    `n_tilts` 2D projections.
+
+    Args:
+        x_gt: (n_images, 1, D, H, W)
+        corruptions_per_object: number of independent tilt-series acquisitions per GT object
+        n_tilts: T, number of tilts (projections) within one acquisition's series
+        tilt_increment_deg: angular step between consecutive tilts, in degrees
+        noise_std: float
+        tilt_axis: the FIXED physical tilt axis, in lab-frame coordinates
+
+    Returns:
+        y_obs:   (n_images * corruptions_per_object * n_tilts, 1, H, W) — the observation set
+        R_star:  (n_images * corruptions_per_object * n_tilts, 3, 3)   — the true rotation
+            matrix used per observation. Diagnostic ONLY — never fed to the model. Kept as a
+            matrix (not the 6D pose representation) since it's never fed to the interpolant and
+            matrices are the natural input to si.rotation_geodesic_angle.
+        image_idx: (n_images * corruptions_per_object * n_tilts,) — which source object each
+            observation came from.
+        acq_idx:   (n_images * corruptions_per_object * n_tilts,) — which acquisition each
+            observation belongs to; contiguous and in tilt order, so y_obs[acq_idx == a] is one
+            full tilt series.
+    """
+    n_images = x_gt.size(0)
+    n_acq = n_images * corruptions_per_object
+    tilt_increment = tilt_increment_deg * torch.pi / 180.0
+
+    x_per_acq = x_gt.repeat_interleave(corruptions_per_object, dim=0)  # (n_acq, 1, D, H, W)
+    R = sample_tilt_series_rotations_so3(n_acq, n_tilts, tilt_increment,
+                                         tilt_axis=tilt_axis, device=x_gt.device)  # (n_acq,T,3,3)
+
+    x_expanded = x_per_acq.repeat_interleave(n_tilts, dim=0)  # (n_acq*T, 1, D, H, W)
+    R_flat = R.reshape(-1, 3, 3)                              # (n_acq*T, 3, 3)
+    pose6_flat = matrix_to_gram_schmidt(R_flat)
+    y_obs, _ = forward_channel_3d(x_expanded, noise_std=noise_std, pose6=pose6_flat)
+    image_idx = torch.arange(n_images).repeat_interleave(corruptions_per_object * n_tilts)
+    acq_idx = torch.arange(n_acq).repeat_interleave(n_tilts)
+    return y_obs, R_flat, image_idx, acq_idx

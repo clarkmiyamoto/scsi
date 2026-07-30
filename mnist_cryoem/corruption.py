@@ -1,7 +1,8 @@
 import torch
 import torch.nn.functional as F
+from scipy.spatial.transform import Rotation
 
-from si import wrap_to_pi
+from si import wrap_to_pi, axis_angle_to_matrix, gram_schmidt_to_matrix, matrix_to_gram_schmidt
 
 
 def sample_uniform_angle(B: int, device: torch.device | None = None) -> torch.Tensor:
@@ -109,3 +110,132 @@ def forward_channel(
     y = project_1d(x_rot)
     y = y + noise_std * torch.randn_like(y)
     return y, theta
+
+
+########################################################
+# CryoET-style 3D->2D channel: SO(3) rotation -> 2D projection -> AWGN. Rotation is always
+# represented as a (B,3,3) matrix INTERNALLY in this module (composition of the mount+tilt
+# rotations below is plain matrix multiplication — no quaternions anywhere here); the public
+# boundary of forward_channel_3d uses the (B,6) Gram-Schmidt representation, matching what the
+# model/interpolant consume (see si.py's module docstring for the full rationale).
+########################################################
+
+def sample_uniform_rotation_so3(B: int, device: torch.device | None = None) -> torch.Tensor:
+    """
+    Haar-uniform rotation on SO(3), as a (B, 3, 3) matrix, via
+    scipy.spatial.transform.Rotation.random — the same precedent already used by
+    simple_3d/corruption.py and toy_3d/*.py.
+    """
+    R_np = Rotation.random(B).as_matrix().astype("float32")
+    return torch.from_numpy(R_np).to(device)
+
+
+def sample_tilt_series_rotations_so3(
+    n_acquisitions: int, n_tilts: int, tilt_increment: float,
+    tilt_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """
+    3D analogue of sample_tilt_series_angles: one random Haar-uniform "mount" rotation per
+    acquisition (unknown specimen orientation, applied FIRST/inner), composed with T
+    evenly-spaced rotations about a FIXED lab-frame tilt axis (applied SECOND/outer), starting
+    from an independent Haar-uniform-derived random offset per acquisition — generalizing the
+    2D case, where "mount" and "tilt axis" collapse into the same single SO(2) freedom.
+
+    R_total = R_tilt(angle_i) @ R_mount — tilt OUTER (lab frame), mount INNER (specimen frame,
+    applied first: the specimen is mounted at a random unknown orientation FIRST; the holder
+    then tilts about ITS OWN fixed physical axis SECOND). Composition order is verified by
+    test_so3_math.py — swapping it breaks the single-tilt-axis property (each acquisition would
+    tilt about a different physical axis, no longer a real tilt series).
+
+    Args:
+        n_acquisitions: how many independent tilt series to draw.
+        n_tilts: T, number of tilts within one series.
+        tilt_increment: angular step between consecutive tilts, in radians.
+        tilt_axis: the FIXED physical tilt axis, in lab-frame coordinates.
+
+    Returns:
+        R: (n_acquisitions, n_tilts, 3, 3)
+    """
+    R_mount = sample_uniform_rotation_so3(n_acquisitions, device)             # (n_acq, 3, 3)
+    start = torch.rand(n_acquisitions, device=device) * 2 * torch.pi          # (n_acq,) Uniform(0,2pi)
+    steps = torch.arange(n_tilts, device=device, dtype=start.dtype) * tilt_increment  # (T,)
+    angles = start[:, None] + steps[None, :]                                  # (n_acq, T)
+
+    axis = torch.tensor(tilt_axis, device=device, dtype=start.dtype)
+    R_tilt = axis_angle_to_matrix(axis, angles.reshape(-1))                    # (n_acq*T, 3, 3)
+    R_tilt = R_tilt.reshape(n_acquisitions, n_tilts, 3, 3)
+
+    R_mount_exp = R_mount[:, None, :, :].expand(-1, n_tilts, -1, -1)          # (n_acq, T, 3, 3)
+    return torch.matmul(R_tilt, R_mount_exp)
+
+
+def rotate_3d(x: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
+    """
+    Rotate each (1, D, H, W) volume in the batch by its own rotation matrix, black-fill
+    background with true black (-1) via the same shifted-frame trick as rotate_2d — deliberately
+    NOT simple_3d's padding_mode='zeros' without the shift, which silently rotates background
+    into false 0-density.
+
+    Args:
+        x: (B, 1, D, H, W) in [-1, 1]
+        R: (B, 3, 3)
+
+    Returns:
+        (B, 1, D, H, W) in [-1, 1]
+    """
+    zeros = torch.zeros(R.size(0), 3, 1, device=x.device, dtype=R.dtype)
+    theta = torch.cat([R, zeros], dim=2)  # (B, 3, 4)
+
+    grid = F.affine_grid(theta, x.shape, align_corners=True)
+    x_shifted = x + 1.0
+    x_rot = F.grid_sample(x_shifted, grid, align_corners=True,
+                          mode="bilinear", padding_mode="zeros")
+    return x_rot - 1.0
+
+
+def project_2d(x: torch.Tensor) -> torch.Tensor:
+    """
+    Parallel-beam projection: integrate along the depth axis.
+
+    Args:
+        x: (B, 1, D, H, W)
+
+    Returns:
+        (B, 1, H, W)
+    """
+    return x.sum(dim=2)
+
+
+def forward_channel_3d(
+    x: torch.Tensor,
+    noise_std: float,
+    pose6: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    CryoET-style 3D->2D channel: SO(3) rotation (black fill) -> 2D projection -> AWGN.
+
+    Args:
+        x: (B, 1, D, H, W)
+        noise_std: float
+        pose6: (B, 6) Gram-Schmidt rotation representation. If None, a fresh Haar-uniform
+            rotation is drawn per sample (used for synthesizing y_obs). If given, that rotation
+            is reused instead of drawing a new one — this is how a pool's recovered pose6_hat
+            is fed back through F for ŷ = F(x̂; pose6_hat). Converted to a (B,3,3) matrix via
+            si.gram_schmidt_to_matrix ONLY internally, to call rotate_3d — the public contract
+            stays (B,6) throughout, matching what the model/interpolant consume.
+
+    Returns:
+        y: (B, 1, H, W)
+        pose6_used: (B, 6)
+    """
+    B = x.size(0)
+    if pose6 is None:
+        R = sample_uniform_rotation_so3(B, x.device)
+        pose6 = matrix_to_gram_schmidt(R)
+    else:
+        R = gram_schmidt_to_matrix(pose6)
+    x_rot = rotate_3d(x, R)
+    y = project_2d(x_rot)
+    y = y + noise_std * torch.randn_like(y)
+    return y, pose6

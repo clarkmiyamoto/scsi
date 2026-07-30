@@ -36,15 +36,20 @@ def overfit_single_batch(
     style: str,
     pose_loss_weight: float,
     use_wandb: bool,
+    loss_fn=loss_func_joint,
 ) -> float:
     """Runs n_steps of SGD against the exact same (x_batch, theta_batch, y_batch) every step,
-    using a fresh optimizer scoped to this check. Returns the final total loss."""
+    using a fresh optimizer scoped to this check. Returns the final total loss.
+
+    `loss_fn` defaults to the 2D `loss_func_joint` (unchanged behavior for every existing
+    caller). main_3d.py passes `loss_fn=scsi.loss_func_joint_3d` to run this same sanity check
+    against the 3D/CryoET pipeline without duplicating this file."""
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     model.train()
 
     loss = torch.tensor(float("nan"))
     for step in tqdm(range(n_steps), desc="overfit"):
-        loss, loss_img, loss_pose = loss_func_joint(
+        loss, loss_img, loss_pose = loss_fn(
             model, x_batch, theta_batch, y_batch,
             style=style, pose_loss_weight=pose_loss_weight,
         )

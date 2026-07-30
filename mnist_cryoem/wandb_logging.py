@@ -4,9 +4,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from si import wrap_to_pi
-from corruption import forward_channel, sample_uniform_angle
-from ode import sample_joint
+from si import wrap_to_pi, rotation_geodesic_angle, gram_schmidt_to_matrix, matrix_to_gram_schmidt
+from corruption import (
+    forward_channel, sample_uniform_angle,
+    forward_channel_3d, sample_uniform_rotation_so3, project_2d,
+)
+from ode import sample_joint, sample_joint_3d
 from model import IMAGE_SIZE
 
 try:
@@ -280,6 +283,248 @@ def log_reconstruction_grid(
     else:
         from pathlib import Path
         out = Path("mnist_cryoem_eval")
+        out.mkdir(exist_ok=True)
+        fig.savefig(out / f"em_reconstruction_{em_step:04d}.png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+########################################################
+# 3D / CryoET diagnostics. Mirror the 2D functions above, with two structural differences:
+# (1) rotation_geodesic_angle (on gram_schmidt_to_matrix'd rotations) replaces wrap_to_pi-based
+#     circular error throughout; (2) each observation here is a full (H,W) image, not a 1D
+#     signal, so the sinogram-stacking trick doesn't apply — replaced with sum-projection
+#     mosaics / horizontal strips (see log_reconstruction_grid_3d's docstring).
+########################################################
+
+def _projection_mosaic(x: torch.Tensor) -> torch.Tensor:
+    """
+    (B, 1, D, H, W) -> (B, H, 3W): xy|xz|yz sum-projections concatenated horizontally.
+    Assumes D=H=W (a cube), so the three projections share a common shape. The xy projection
+    uses the same summing convention as corruption.project_2d, directly comparable to the
+    observation channel.
+    """
+    xy = project_2d(x)     # (B, 1, H, W), sum over D
+    xz = x.sum(dim=3)       # (B, 1, D, W), sum over H
+    yz = x.sum(dim=4)       # (B, 1, D, H), sum over W
+    return torch.cat([xy, xz, yz], dim=-1)[:, 0]  # (B, H, 3W)
+
+
+@torch.no_grad()
+def log_pretrain_reconstruction_3d(
+    model: nn.Module,
+    x_gt: torch.Tensor,    # (n, 1, D, H, W) canonical GT volumes to visualize
+    noise_std: float,
+    sample_steps: int,
+    step: int,
+    use_wandb: bool,
+    n: int = 6,
+) -> None:
+    """
+    3D analogue of log_pretrain_reconstruction. Draws a fresh random rotation for n GT volumes,
+    builds the observation y = F(x_gt; R), and asks the CURRENT model to invert it via the
+    E-step integrator (ode.sample_joint_3d, z ~ N(0,I) | y) -> (x_hat, pose_hat). Logs a 4-row
+    panel (GT xy|xz|yz mosaic / Obs y / model x_hat's mosaic / F(x_hat) recorrupted) plus mean
+    geodesic error — here a real accuracy metric (pretrain_3d.py has true GT rotations), unlike
+    log_em_pool_diagnostics_3d's pool-vs-pool error which is diagnostic-only.
+
+    sample_joint_3d leaves the model in eval() mode (it doesn't restore it) — this function
+    restores model.train() before returning so the caller's training loop is unaffected.
+    """
+    n = min(n, x_gt.size(0))
+    x_gt = x_gt[:n]
+    device = x_gt.device
+
+    R_true = sample_uniform_rotation_so3(n, device)
+    pose_true = matrix_to_gram_schmidt(R_true)
+    y_obs, _ = forward_channel_3d(x_gt, noise_std=noise_std, pose6=pose_true)
+
+    z_vol = torch.randn_like(x_gt)
+    x_hat, pose_hat = sample_joint_3d(model, z_vol, y_obs, n_steps=sample_steps)
+    model.train()
+
+    proj_hat, _ = forward_channel_3d(x_hat, noise_std=0.0, pose6=pose_hat)
+    geo_err = rotation_geodesic_angle(gram_schmidt_to_matrix(pose_hat), R_true).abs().mean().item()
+
+    gt_mosaic = _projection_mosaic(x_gt).cpu()      # (n, H, 3W)
+    obs = y_obs[:, 0].cpu()                          # (n, H, W)
+    gen_mosaic = _projection_mosaic(x_hat).cpu()     # (n, H, 3W)
+    proj = proj_hat[:, 0].cpu()                       # (n, H, W)
+
+    # All four rows are sum-projections (unlike the 2D version's split between raw [-1,1]
+    # image rows and 1D-signal rows) — one dynamic range per column, shared across all 4 rows.
+    rows = [
+        (gt_mosaic, "GT xy|xz|yz"),
+        (obs, "Obs y"),
+        (gen_mosaic, "Model x_hat xy|xz|yz"),
+        (proj, "F(x_hat)"),
+    ]
+    fig, axes = plt.subplots(4, n, figsize=(2.4 * n, 8), squeeze=False)
+    for r, (_, label) in enumerate(rows):
+        axes[r, 0].set_ylabel(label, fontsize=9)
+    for j in range(n):
+        lo = min(data[j].min().item() for data, _ in rows)
+        hi = max(data[j].max().item() for data, _ in rows)
+        if hi - lo < 1e-8:
+            hi = lo + 1e-8
+        for r, (data, _) in enumerate(rows):
+            axes[r, j].imshow(data[j].numpy(), cmap="gray", vmin=lo, vmax=hi, aspect="auto")
+            axes[r, j].set_xticks([])
+            axes[r, j].set_yticks([])
+
+    fig.suptitle(f"pretrain step {step}  |  mean geodesic error={geo_err:.3f} rad",
+                fontsize=11)
+    plt.tight_layout()
+
+    if use_wandb:
+        wandb.log({"pretrain/reconstruction": wandb.Image(fig),
+                  "pretrain/geodesic_error": geo_err}, step=step)
+    else:
+        from pathlib import Path
+        out = Path("mnist_cryoet_eval")
+        out.mkdir(exist_ok=True)
+        fig.savefig(out / f"pretrain_step_{step:04d}.png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+def log_em_pool_diagnostics_3d(
+    pose_pool: torch.Tensor,     # (n, 6)     this iteration's Phi^(k-1)-recovered poses
+    R_star: torch.Tensor,        # (N_obs, 3, 3)  diagnostic only, never used in training
+    pool_indices: torch.Tensor,  # (n,) indices into R_star for this iteration's pool
+    wandb_step: int,
+    use_wandb: bool,
+) -> None:
+    """
+    3D analogue of log_em_pool_diagnostics: mean geodesic angle between the pool's
+    Phi^(k-1)-recovered rotations and the true rotations for the SAME sampled observations.
+    """
+    if not use_wandb:
+        return
+    R_pool = gram_schmidt_to_matrix(pose_pool)
+    geo_err = rotation_geodesic_angle(R_pool, R_star[pool_indices]).abs().mean().item()
+    wandb.log({"em/geodesic_error": geo_err}, step=wandb_step)
+
+
+@torch.no_grad()
+def log_reconstruction_grid_3d(
+    model: nn.Module,
+    x_gt: torch.Tensor,        # (n_images, 1, D, H, W)
+    y_obs: torch.Tensor,       # (N_obs, 1, H, W)
+    R_star: torch.Tensor,      # (N_obs, 3, 3)  diagnostic only, never used in training
+    image_idx: torch.Tensor,   # (N_obs,)
+    acq_idx: torch.Tensor,     # (N_obs,)  which acquisition each observation belongs to
+    fixed_acq_id: int,
+    n_acq: int,
+    sample_steps: int,
+    em_step: int,
+    wandb_step: int,
+    use_wandb: bool,
+    device: torch.device,
+    n_problems: int = 6,
+    n_tilt_preview: int = 4,
+) -> None:
+    """
+    3D/CryoET analogue of log_reconstruction_grid. Since each observation here is a full (H,W)
+    image (not a 1D signal), the 2D version's (T,W)-sinogram-stacking trick doesn't apply —
+    replaced with:
+
+      Row 0 — GT volume's xy|xz|yz sum-projection mosaic (see _projection_mosaic).
+      Row 1 — a small strip of n_tilt_preview evenly-spaced REAL tilt observations from that
+              acquisition, horizontally concatenated.
+      Row 2 — ONE generated x_hat's xy|xz|yz mosaic, conditioned on the acquisition's middle
+              preview tilt's observation (the model only ever conditions on a single y; there's
+              no joint multi-tilt conditioning to fall back on, so one representative tilt is
+              chosen — mirrors the 2D version's limitation).
+      Row 3 — that SAME x_hat reprojected (F, noise_std=0) at every preview tilt's TRUE pose,
+              same strip layout as Row 1 — directly comparable to Row 1.
+    Column titles show the conditioning tilt's recovered-vs-true geodesic error in degrees.
+
+    Runs its own small E-step (ode.sample_joint_3d) directly rather than reusing
+    scsi.py::propose_estep_3d — same circular-import reasoning as log_reconstruction_grid.
+    """
+    other_ids = torch.randperm(n_acq)
+    other_ids = other_ids[other_ids != fixed_acq_id][:n_problems - 1]
+    acq_ids = [fixed_acq_id] + other_ids.tolist()
+    n = len(acq_ids)
+
+    gt_mosaics, obs_strips, gen_mosaics, recorrupt_strips, col_titles = [], [], [], [], []
+    T = n_tilt_preview
+
+    for a in acq_ids:
+        mask = acq_idx == a
+        y_acq = y_obs[mask]
+        R_star_acq = R_star[mask]
+        img_idx = image_idx[mask][0].item()
+        T = y_acq.size(0)
+
+        if T > n_tilt_preview:
+            rsel = torch.linspace(0, T - 1, n_tilt_preview).round().long()
+            y_acq = y_acq[rsel]
+            R_star_acq = R_star_acq[rsel]
+            T = n_tilt_preview
+
+        cond_i = T // 2
+        z_vol = torch.randn(1, 1, *x_gt.shape[-3:], device=device)
+        x_hat, pose_hat = sample_joint_3d(
+            model, z_vol, y_acq[cond_i:cond_i + 1].to(device), n_steps=sample_steps,
+        )
+
+        recorrupt, _ = forward_channel_3d(
+            x_hat.expand(T, -1, -1, -1, -1).contiguous(), noise_std=0.0,
+            pose6=matrix_to_gram_schmidt(R_star_acq.to(device)),
+        )  # (T, 1, H, W): the SAME single x_hat reprojected at every preview tilt's true pose
+
+        gt_mosaics.append(_projection_mosaic(x_gt[img_idx:img_idx + 1]).cpu()[0])  # (H, 3W)
+        obs_strips.append(torch.cat(list(y_acq[:, 0]), dim=-1).cpu())             # (H, T*W)
+        gen_mosaics.append(_projection_mosaic(x_hat).cpu()[0])                     # (H, 3W)
+        recorrupt_strips.append(torch.cat(list(recorrupt[:, 0]), dim=-1).cpu())   # (H, T*W)
+
+        R_hat = gram_schmidt_to_matrix(pose_hat)
+        rec_err_deg = rotation_geodesic_angle(
+            R_hat, R_star_acq[cond_i:cond_i + 1].to(device)
+        ).item() * 180.0 / torch.pi
+        tag = " (fixed)" if a == fixed_acq_id else ""
+        col_titles.append(f"acq={a}{tag}\ncond geodesic err: {rec_err_deg:.0f}°")
+
+    model.train()
+
+    fig, axes = plt.subplots(4, n, figsize=(2.6 * n, 9), squeeze=False)
+    row_labels = ["GT xy|xz|yz", f"Obs y ({T} tilts)", f"pi({em_step}) xy|xz|yz",
+                  "Recorrupt (true pose)"]
+    for r, label in enumerate(row_labels):
+        axes[r, 0].set_ylabel(label, fontsize=9)
+
+    # Row-PAIR scaling, same pattern as log_reconstruction_grid: (Obs y, Recorrupt) share one
+    # scale, (GT mosaic, pi(k) mosaic) share another.
+    for j in range(n):
+        strip_lo = min(obs_strips[j].min().item(), recorrupt_strips[j].min().item())
+        strip_hi = max(obs_strips[j].max().item(), recorrupt_strips[j].max().item())
+        if strip_hi - strip_lo < 1e-8:
+            strip_hi = strip_lo + 1e-8
+
+        mosaic_lo = min(gt_mosaics[j].min().item(), gen_mosaics[j].min().item())
+        mosaic_hi = max(gt_mosaics[j].max().item(), gen_mosaics[j].max().item())
+        if mosaic_hi - mosaic_lo < 1e-8:
+            mosaic_hi = mosaic_lo + 1e-8
+
+        axes[0, j].imshow(gt_mosaics[j].numpy(), cmap="gray", vmin=mosaic_lo, vmax=mosaic_hi)
+        axes[1, j].imshow(obs_strips[j].numpy(), cmap="gray", vmin=strip_lo, vmax=strip_hi,
+                          aspect="auto")
+        axes[2, j].imshow(gen_mosaics[j].numpy(), cmap="gray", vmin=mosaic_lo, vmax=mosaic_hi)
+        axes[3, j].imshow(recorrupt_strips[j].numpy(), cmap="gray", vmin=strip_lo, vmax=strip_hi,
+                          aspect="auto")
+        axes[0, j].set_title(col_titles[j], fontsize=7)
+        for r in range(4):
+            axes[r, j].set_xticks([])
+            axes[r, j].set_yticks([])
+
+    fig.suptitle(f"em/reconstruction  |  EM step {em_step}", fontsize=11)
+    plt.tight_layout()
+
+    if use_wandb:
+        wandb.log({"em/reconstruction": wandb.Image(fig)}, step=wandb_step)
+    else:
+        from pathlib import Path
+        out = Path("mnist_cryoet_eval")
         out.mkdir(exist_ok=True)
         fig.savefig(out / f"em_reconstruction_{em_step:04d}.png", dpi=100, bbox_inches="tight")
     plt.close(fig)

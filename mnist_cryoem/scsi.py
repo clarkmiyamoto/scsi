@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from si import interpolant, pose_interpolant
-from ode import sample_joint
-from corruption import forward_channel, sample_uniform_angle
-from model import IMAGE_SIZE
+from ode import sample_joint, sample_joint_3d
+from corruption import forward_channel, sample_uniform_angle, forward_channel_3d
+from model import IMAGE_SIZE, VOL_SIZE
 from wandb_logging import log_train_step
 
 try:
@@ -158,6 +158,152 @@ def train_mstep(
 
         loss, loss_img, loss_pose = loss_func_joint(
             model, x_batch, theta_batch, y_batch,
+            style=style, pose_loss_weight=pose_loss_weight,
+        )
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+
+        running_img += loss_img.item()
+        running_pose += loss_pose.item()
+
+        log_train_step(loss_img, loss_pose, grad_norm, global_step[0], use_wandb)
+        if global_step is not None:
+            global_step[0] += 1
+
+    print(f"    steps={steps_per_em}  loss_image={running_img / steps_per_em:.5f}"
+          f"  loss_pose={running_pose / steps_per_em:.5f}")
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+
+
+########################################################
+# 3D / CryoET E-step and M-step. Mirror propose_estep/loss_func_joint/train_mstep exactly,
+# with the volume (B,1,D,H,W) in place of the image and the flat 6D pose representation
+# (si.py's module docstring) in place of the SO(2) angle — including reusing si.interpolant
+# for BOTH branches in loss_func_joint_3d, since pose is no longer manifold-valued.
+########################################################
+
+@torch.no_grad()
+def propose_estep_3d(
+    model: nn.Module,
+    y_obs_subset: torch.Tensor,   # (N, 1, H, W) — only the resampled subset for this iteration
+    n_steps: int = 50,
+    batch_size: int = 256,
+    method: str = "euler",
+    device: torch.device = None,
+    vol_size: int = VOL_SIZE,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """3D analogue of propose_estep — runs ode.sample_joint_3d conditioned on y_obs_subset."""
+    model.eval()
+    N = y_obs_subset.size(0)
+    x_chunks, pose_chunks = [], []
+    y_gpu = y_obs_subset.to(device)
+
+    for start in tqdm(range(0, N, batch_size), desc="  E-step", leave=False):
+        end = min(start + batch_size, N)
+        B = end - start
+        z_vol = torch.randn(B, 1, vol_size, vol_size, vol_size, device=device)
+        x_batch, pose_batch = sample_joint_3d(model, z_vol, y_gpu[start:end],
+                                              n_steps=n_steps, method=method)
+        x_chunks.append(x_batch.cpu())
+        pose_chunks.append(pose_batch.cpu())
+
+    x_pool = torch.cat(x_chunks, dim=0)
+    pose_pool = torch.cat(pose_chunks, dim=0)
+    print(f"    pool  x range=[{x_pool.min():.3f}, {x_pool.max():.3f}]"
+          f"  mean={x_pool.mean():.4f}  std={x_pool.std():.4f}")
+
+    if device is not None:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        elif device.type == "mps":
+            torch.mps.empty_cache()
+    return x_pool, pose_pool
+
+
+def loss_func_joint_3d(
+    model: nn.Module,
+    x_hat: torch.Tensor,      # (B, 1, D, H, W) — image branch's x1 target
+    pose_hat: torch.Tensor,   # (B, 6)           — pose branch's x1 target
+    y: torch.Tensor,          # (B, 1, H, W)     — observation to condition on
+    style: str = "linear",
+    pose_loss_weight: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    3D analogue of loss_func_joint. Reuses si.interpolant for BOTH branches — the pose branch
+    needs no geodesic interpolant since it's the flat 6D representation (si.py's module
+    docstring), so this is the same function, same `style`, called twice with different
+    broadcast shapes.
+
+    Returns (total_loss, image_loss.detach(), pose_loss.detach()) for separate logging.
+    """
+    B = x_hat.size(0)
+    t = torch.rand(B, device=x_hat.device)
+
+    z_vol = torch.randn_like(x_hat)
+    pose_z = torch.randn(B, 6, device=x_hat.device)  # plain Gaussian noise, not a rotation draw
+
+    t5 = t[:, None, None, None, None]
+    t2 = t[:, None]
+    I_t, I_dot_t = interpolant(z_vol, x_hat, t5, style)
+    pose_t, pose_dot_t = interpolant(pose_z, pose_hat, t2, style)
+
+    v_x, v_pose = model(I_t, pose_t, t, y)
+
+    loss_image = F.mse_loss(v_x, I_dot_t)
+    loss_pose = F.mse_loss(v_pose, pose_dot_t)
+    loss = loss_image + pose_loss_weight * loss_pose
+    return loss, loss_image.detach(), loss_pose.detach()
+
+
+def train_mstep_3d(
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    x_pool: torch.Tensor,     # (N, 1, D, H, W) — this iteration's Phi^(k-1)-generated x_hat's
+    pose_pool: torch.Tensor,  # (N, 6)           — this iteration's Phi^(k-1)-generated poses
+    noise_std: float,
+    style: str,
+    pose_loss_weight: float,
+    steps_per_em: int,
+    batch_size: int,
+    global_step: list,
+    device: torch.device,
+    use_wandb: bool,
+) -> None:
+    """
+    3D analogue of train_mstep — same fixed-pool/persistent-optimizer contract (see
+    train_mstep's docstring). NOTE: --steps_per_em 1 (literal pseudocode, a fresh Phi^(k-1) pool
+    generation every SGD step) is computationally IMPRACTICAL at 3D scale — the E-step's cost is
+    pool_size * sample_steps full 3D UNet passes per pool refresh; amortized mode (steps_per_em
+    in the tens-to-hundreds) is the only practical regime here, even though the code path itself
+    supports steps_per_em=1 just like the 2D version.
+    """
+    N = x_pool.size(0)
+    model.train()
+
+    perm = torch.randperm(N)
+    ptr = 0
+    running_img, running_pose = 0.0, 0.0
+
+    for step in tqdm(range(steps_per_em), desc="  M-step", leave=False):
+        if ptr + batch_size > N:
+            perm = torch.randperm(N)
+            ptr = 0
+        idx = perm[ptr:ptr + min(batch_size, N)]
+        ptr += batch_size
+
+        x_batch = x_pool[idx].to(device)
+        pose_batch = pose_pool[idx].to(device)
+
+        y_batch, _ = forward_channel_3d(x_batch, noise_std=noise_std, pose6=pose_batch)
+
+        loss, loss_img, loss_pose = loss_func_joint_3d(
+            model, x_batch, pose_batch, y_batch,
             style=style, pose_loss_weight=pose_loss_weight,
         )
         opt.zero_grad(set_to_none=True)
