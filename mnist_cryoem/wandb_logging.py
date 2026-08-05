@@ -9,6 +9,7 @@ from si import wrap_to_pi, rotation_geodesic_angle, gram_schmidt_to_matrix, matr
 from corruption import (
     forward_channel, sample_uniform_angle,
     forward_channel_3d, sample_uniform_rotation_so3, project_2d,
+    forward_channel_mra,
 )
 from ode import sample_joint, sample_joint_3d
 from model import IMAGE_SIZE
@@ -286,6 +287,224 @@ def log_reconstruction_grid(
         out = Path("mnist_cryoem_eval")
         out.mkdir(exist_ok=True)
         fig.savefig(out / f"em_reconstruction_{em_step:04d}.png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+########################################################
+# Rotational-MRA diagnostics. log_em_pool_diagnostics is reused UNMODIFIED (it only ever touches
+# theta_pool/theta_star/pool_indices — zero image tensors — so it's already channel-agnostic).
+# Only the reconstruction panel needs an MRA-specific version, since there's no tilt series to
+# stack into a sinogram here: every row is already a plain (H,W) image.
+########################################################
+
+@torch.no_grad()
+def log_reconstruction_grid_mra(
+    model: nn.Module,
+    x_gt: torch.Tensor,        # (n_images, 1, H, W)
+    y_obs: torch.Tensor,       # (N_obs, 1, H, W)
+    theta_star: torch.Tensor,  # (N_obs,)  diagnostic only, never used in training
+    image_idx: torch.Tensor,   # (N_obs,)
+    fixed_obs_id: int,
+    sample_steps: int,
+    em_step: int,
+    wandb_step: int,
+    use_wandb: bool,
+    device: torch.device,
+    n_problems: int = 6,
+) -> None:
+    """
+    MRA analogue of log_reconstruction_grid / log_reconstruction_grid_3d. There is no
+    tilt-series / acquisition grouping in this channel (see data.build_observations_mra), so
+    each COLUMN here is one OBSERVATION, not a group — no sinogram/strip-stacking row is needed
+    at all (unlike both other pipelines), since every row is already a plain (H,W) image.
+    Column 0 is always `fixed_obs_id` (tracked across the whole run, so you can watch the same
+    particle improve over EM steps); the remaining columns are freshly re-randomized observation
+    indices each call.
+
+      Row 0 — GT digit the observation came from (single canonical, disk-masked image)
+      Row 1 — the observation y itself
+      Row 2 — ONE generated sample x_hat, conditioned on that observation's y
+      Row 3 — that SAME x_hat re-corrupted (F_MRA, noise_std=0) at the observation's TRUE
+              angle — directly comparable to Row 1. Isolates "is the reconstructed image
+              right" from "is the recovered pose right" (the latter already has its own
+              diagnostic in log_em_pool_diagnostics — note that metric is gauge-ambiguous: the
+              learned (image, pose) prior is only identifiable up to a global rotation, so a
+              plateau at a nonzero constant isn't necessarily a training failure) by
+              recorrupting at the known true angle rather than the recovered one.
+    Column titles show the true vs. recovered angle in degrees.
+
+    Runs its own small E-step (ode.sample_joint) directly rather than reusing
+    scsi.py::propose_estep — same circular-import reasoning as log_reconstruction_grid
+    (scsi.py already imports this module for log_train_step).
+    """
+    N_obs = y_obs.size(0)
+    other_ids = torch.randperm(N_obs)
+    other_ids = other_ids[other_ids != fixed_obs_id][:n_problems - 1]
+    obs_ids = [fixed_obs_id] + other_ids.tolist()
+    n = len(obs_ids)
+
+    gt_imgs, obs_imgs, gen_imgs, recorrupt_imgs, col_titles = [], [], [], [], []
+
+    for o in obs_ids:
+        y_o = y_obs[o:o + 1].to(device)
+        theta_o = theta_star[o:o + 1].to(device)
+        img_idx = image_idx[o].item()
+
+        z_image = torch.randn(1, 1, IMAGE_SIZE, IMAGE_SIZE, device=device)
+        x_hat, theta_hat = sample_joint(model, z_image, y_o, n_steps=sample_steps)
+
+        recorrupt, _ = forward_channel_mra(x_hat, noise_std=0.0, theta=theta_o)
+
+        gt_imgs.append(x_gt[img_idx, 0].cpu())
+        obs_imgs.append(y_obs[o, 0].cpu())
+        gen_imgs.append(x_hat[0, 0].cpu())
+        recorrupt_imgs.append(recorrupt[0, 0].cpu())
+
+        true_deg = theta_star[o].item() * 180.0 / torch.pi
+        rec_deg = theta_hat[0].item() * 180.0 / torch.pi
+        tag = " (fixed)" if o == fixed_obs_id else ""
+        col_titles.append(f"obs={o}{tag}\ntrue θ {true_deg:.0f}° rec θ {rec_deg:.0f}°")
+
+    model.train()
+
+    fig, axes = plt.subplots(4, n, figsize=(2.4 * n, 9), squeeze=False)
+    row_labels = ["GT digit", "Obs y", f"pi({em_step}) sample", "Recorrupt (true θ)"]
+    for r, label in enumerate(row_labels):
+        axes[r, 0].set_ylabel(label, fontsize=9)
+
+    # Row-PAIR scaling, same pattern as log_reconstruction_grid/log_reconstruction_grid_3d:
+    # (Obs y, Recorrupt) share one scale, (GT digit, pi(k) sample) share another, rather than
+    # one scale across the whole panel — keeps an out-of-range/undertrained sample from washing
+    # out under GT's fixed [-1,1] scale, and keeps each pair directly comparable to each other.
+    for j in range(n):
+        img_lo = min(gt_imgs[j].min().item(), gen_imgs[j].min().item())
+        img_hi = max(gt_imgs[j].max().item(), gen_imgs[j].max().item())
+        if img_hi - img_lo < 1e-8:
+            img_hi = img_lo + 1e-8
+
+        obs_lo = min(obs_imgs[j].min().item(), recorrupt_imgs[j].min().item())
+        obs_hi = max(obs_imgs[j].max().item(), recorrupt_imgs[j].max().item())
+        if obs_hi - obs_lo < 1e-8:
+            obs_hi = obs_lo + 1e-8
+
+        axes[0, j].imshow(gt_imgs[j].numpy(), cmap="gray", vmin=img_lo, vmax=img_hi)
+        axes[1, j].imshow(obs_imgs[j].numpy(), cmap="gray", vmin=obs_lo, vmax=obs_hi)
+        axes[2, j].imshow(gen_imgs[j].numpy(), cmap="gray", vmin=img_lo, vmax=img_hi)
+        axes[3, j].imshow(recorrupt_imgs[j].numpy(), cmap="gray", vmin=obs_lo, vmax=obs_hi)
+        axes[0, j].set_title(col_titles[j], fontsize=7)
+        for r in range(4):
+            axes[r, j].set_xticks([])
+            axes[r, j].set_yticks([])
+
+    fig.suptitle(f"em/reconstruction  |  EM step {em_step}", fontsize=11)
+    plt.tight_layout()
+
+    if use_wandb:
+        wandb.log({"em/reconstruction": wandb.Image(fig)}, step=wandb_step)
+    else:
+        from pathlib import Path
+        out = Path("mnist_mra_rotation_eval")
+        out.mkdir(exist_ok=True)
+        fig.savefig(out / f"em_reconstruction_{em_step:04d}.png", dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+@torch.no_grad()
+def log_pretrain_reconstruction_mra(
+    model: nn.Module,
+    x_gt: torch.Tensor,    # (n, 1, H, W) canonical, disk-masked GT digits to visualize
+    noise_std: float,
+    sample_steps: int,
+    step: int,
+    use_wandb: bool,
+    n: int = 6,
+) -> None:
+    """
+    MRA analogue of log_pretrain_reconstruction, for pretrain_mra_rotation.py. Draws a fresh
+    random rotation for n GT digits, builds the observation y = F_MRA(x_gt; theta) via
+    forward_channel_mra, and asks the CURRENT model to invert it via the E-step integrator
+    (ode.sample_joint, z ~ N(0,I) | y) -> (x_hat, theta_hat). Logs a 4-row panel (GT digit /
+    Obs y / model x_hat / F_MRA(x_hat; theta_hat)) plus mean circular error
+    |wrap(theta_hat - theta)| — here a real accuracy metric (pretrain_mra_rotation.py has true
+    GT rotations), unlike log_em_pool_diagnostics's pool-vs-pool circular error which is
+    diagnostic-only (same distinction log_pretrain_reconstruction draws for the CryoEM
+    pipeline). Unlike log_pretrain_reconstruction, every row here is already a plain (H,W)
+    image — no 1D-signal "strip" trick needed, since forward_channel_mra never projects.
+
+    Row 3 recorrupts at the RECOVERED angle theta_hat (not the true angle) — unlike
+    log_reconstruction_grid_mra's row 3, which recorrupts at the true angle to isolate image
+    quality from pose quality using a separate pool-level diagnostic (log_em_pool_diagnostics).
+    pretrain_mra_rotation.py has no such separate diagnostic to lean on, so this panel instead
+    shows direct self-consistency: does the model's own (x_hat, theta_hat) reproduce something
+    resembling the y it was conditioned on.
+
+    sample_joint leaves the model in eval() mode (it doesn't restore it) — this function
+    restores model.train() before returning so the caller's training loop is unaffected.
+    """
+    n = min(n, x_gt.size(0))
+    x_gt = x_gt[:n]
+    device = x_gt.device
+
+    theta_true = sample_uniform_angle(n, device)
+    y_obs, _ = forward_channel_mra(x_gt, noise_std=noise_std, theta=theta_true)
+
+    z_image = torch.randn_like(x_gt)
+    x_hat, theta_hat = sample_joint(model, z_image, y_obs, n_steps=sample_steps)
+    model.train()
+
+    recorrupt, _ = forward_channel_mra(x_hat, noise_std=0.0, theta=theta_hat)
+    circ_err = wrap_to_pi(theta_hat - theta_true).abs().mean().item()
+
+    gt_imgs = x_gt[:, 0].cpu()
+    obs_imgs = y_obs[:, 0].cpu()
+    gen_imgs = x_hat[:, 0].cpu()
+    recorrupt_imgs = recorrupt[:, 0].cpu()
+
+    rows = [
+        (gt_imgs, "GT digit"),
+        (obs_imgs, "Obs y"),
+        (gen_imgs, "Model x_hat"),
+        (recorrupt_imgs, "F(x_hat; rec θ)"),
+    ]
+    fig, axes = plt.subplots(4, n, figsize=(2 * n, 8), squeeze=False)
+    for r, (_, label) in enumerate(rows):
+        axes[r, 0].set_ylabel(label, fontsize=9)
+
+    # Row-PAIR scaling, same pattern as log_reconstruction_grid_mra: (GT digit, Model x_hat)
+    # share one scale, (Obs y, Recorrupt) share another, rather than one scale across the whole
+    # panel — keeps an out-of-range/undertrained sample from washing out under GT's fixed
+    # [-1,1] scale.
+    for j in range(n):
+        img_lo = min(gt_imgs[j].min().item(), gen_imgs[j].min().item())
+        img_hi = max(gt_imgs[j].max().item(), gen_imgs[j].max().item())
+        if img_hi - img_lo < 1e-8:
+            img_hi = img_lo + 1e-8
+
+        obs_lo = min(obs_imgs[j].min().item(), recorrupt_imgs[j].min().item())
+        obs_hi = max(obs_imgs[j].max().item(), recorrupt_imgs[j].max().item())
+        if obs_hi - obs_lo < 1e-8:
+            obs_hi = obs_lo + 1e-8
+
+        axes[0, j].imshow(gt_imgs[j].numpy(), cmap="gray", vmin=img_lo, vmax=img_hi)
+        axes[1, j].imshow(obs_imgs[j].numpy(), cmap="gray", vmin=obs_lo, vmax=obs_hi)
+        axes[2, j].imshow(gen_imgs[j].numpy(), cmap="gray", vmin=img_lo, vmax=img_hi)
+        axes[3, j].imshow(recorrupt_imgs[j].numpy(), cmap="gray", vmin=obs_lo, vmax=obs_hi)
+        for r in range(4):
+            axes[r, j].set_xticks([])
+            axes[r, j].set_yticks([])
+
+    fig.suptitle(f"pretrain step {step}  |  mean circular error={circ_err:.3f} rad",
+                fontsize=11)
+    plt.tight_layout()
+
+    if use_wandb:
+        wandb.log({"pretrain/reconstruction": wandb.Image(fig),
+                  "pretrain/circular_error": circ_err}, step=step)
+    else:
+        from pathlib import Path
+        out = Path("mnist_mra_rotation_eval")
+        out.mkdir(exist_ok=True)
+        fig.savefig(out / f"pretrain_step_{step:04d}.png", dpi=100, bbox_inches="tight")
     plt.close(fig)
 
 

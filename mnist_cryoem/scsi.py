@@ -4,7 +4,9 @@ import torch.nn.functional as F
 
 from si import interpolant, pose_interpolant
 from ode import sample_joint, sample_joint_3d
-from corruption import forward_channel, sample_uniform_angle, forward_channel_3d
+from corruption import (
+    forward_channel, sample_uniform_angle, forward_channel_3d, forward_channel_mra,
+)
 from model import IMAGE_SIZE, VOL_SIZE
 from wandb_logging import log_train_step
 
@@ -155,6 +157,82 @@ def train_mstep(
         theta_batch = theta_pool[idx].to(device)
 
         y_batch, _ = forward_channel(x_batch, noise_std=noise_std, theta=theta_batch)
+
+        loss, loss_img, loss_pose = loss_func_joint(
+            model, x_batch, theta_batch, y_batch,
+            style=style, pose_loss_weight=pose_loss_weight,
+        )
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step()
+
+        running_img += loss_img.item()
+        running_pose += loss_pose.item()
+
+        log_train_step(loss_img, loss_pose, grad_norm, global_step[0], use_wandb)
+        if global_step is not None:
+            global_step[0] += 1
+
+    print(f"    steps={steps_per_em}  loss_image={running_img / steps_per_em:.5f}"
+          f"  loss_pose={running_pose / steps_per_em:.5f}")
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+
+
+########################################################
+# Rotational-MRA M-step. No propose_estep_mra / loss_func_joint_mra needed -- propose_estep and
+# loss_func_joint are both already channel-agnostic (neither ever calls forward_channel or
+# inspects y's shape) and are reused UNMODIFIED. train_mstep_mra is the ONE function that needs
+# an MRA-specific copy, since train_mstep hardcodes a call to forward_channel.
+########################################################
+
+def train_mstep_mra(
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    x_pool: torch.Tensor,      # (N, 1, H, W) — this iteration's Phi^(k-1)-generated x_hat's
+    theta_pool: torch.Tensor,  # (N,)          — this iteration's Phi^(k-1)-generated R_hat's
+    noise_std: float,
+    style: str,
+    pose_loss_weight: float,
+    steps_per_em: int,
+    batch_size: int,
+    global_step: list,
+    device: torch.device,
+    use_wandb: bool,
+) -> None:
+    """
+    MRA analogue of train_mstep — identical fixed-pool/persistent-optimizer contract (see
+    train_mstep's docstring; the canonical-target invariant also applies unchanged: x_pool is
+    always the canonical, un-rotated image, and forward_channel_mra RE-APPLIES theta_pool to
+    build y_batch, never the other way around). The ONLY difference from train_mstep is which
+    corruption channel builds y_batch — forward_channel_mra (rotate + full-image AWGN, no
+    projection) instead of forward_channel.
+
+    ŷ = F(x_pool; theta_pool) is recomputed fresh each batch: pose fixed to that sample's
+    Phi^(k-1)-recovered R_hat, noise redrawn every time — the literal ŷ = F(x̂; R̂) term.
+    """
+    N = x_pool.size(0)
+    model.train()
+
+    perm = torch.randperm(N)
+    ptr = 0
+    running_img, running_pose = 0.0, 0.0
+
+    for step in tqdm(range(steps_per_em), desc="  M-step", leave=False):
+        if ptr + batch_size > N:
+            perm = torch.randperm(N)
+            ptr = 0
+        idx = perm[ptr:ptr + min(batch_size, N)]
+        ptr += batch_size
+
+        x_batch = x_pool[idx].to(device)
+        theta_batch = theta_pool[idx].to(device)
+
+        y_batch, _ = forward_channel_mra(x_batch, noise_std=noise_std, theta=theta_batch)
 
         loss, loss_img, loss_pose = loss_func_joint(
             model, x_batch, theta_batch, y_batch,

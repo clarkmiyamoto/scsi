@@ -147,6 +147,37 @@ class ConditionalVelocityCryoEM(nn.Module):
         return v_x, v_theta
 
 
+class ConditionalVelocityMRA(nn.Module):
+    """
+    Joint velocity field b_hat over the (image, SO(2) pose) product state, for the rotational-
+    MRA channel (corruption.forward_channel_mra). Structurally identical to
+    ConditionalVelocityCryoEM -- reuses ConditionalDiT / ConditionalUNet2D / PoseHead UNCHANGED,
+    since both branches already just consume a (B,1,H,W) "y_broadcast"-shaped tensor via
+    cat([x_t, y_broadcast], dim=1). The only difference is what y already IS: forward_channel_mra
+    never projects, so y is natively (B,1,H,W) -- unlike ConditionalVelocityCryoEM.forward, this
+    wrapper does NOT broadcast (no y.unsqueeze(-2).expand(...)); y is passed straight through to
+    both branches as-is. First wrapper in this file where x_t and y already share a shape.
+    """
+    def __init__(self, image_size=IMAGE_SIZE, arch: str = "dit"):
+        super().__init__()
+        self.image_size = image_size
+        if arch == "dit":
+            self.image_branch = ConditionalDiT(image_size=image_size)
+        elif arch == "unet":
+            self.image_branch = ConditionalUNet2D(image_size=image_size)
+        else:
+            raise ValueError(f"Unknown arch: {arch!r}. Choose 'dit' or 'unet'.")
+        self.pose_branch = PoseHead(image_size=image_size)
+
+    def forward(self, x_t: torch.Tensor, theta_t: torch.Tensor,
+                t_frac: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x_t: (B, 1, H, W)   theta_t: (B,)   t_frac: (B,) in [0,1]   y: (B, 1, H, W)
+        t_int = (t_frac * INTEGRATION_SCALE).long()
+        v_x = self.image_branch(x_t, t_int, y)
+        v_theta = self.pose_branch(x_t, y, theta_t, t_frac)
+        return v_x, v_theta
+
+
 class ConditionalUNet3D(nn.Module):
     """
     3D image (volume) branch, for the CryoET generalization. Wraps diffusers'

@@ -113,6 +113,92 @@ def forward_channel(
 
 
 ########################################################
+# Rotational MRA channel: same in-plane SO(2) rotation as forward_channel, but WITHOUT the 1D
+# projection step -- F(x) = R∘x + W stays a full (B,1,H,W) image (classical multi-reference
+# alignment: many independent noisy rotated copies of one signal, no tilt-series / shared-
+# acquisition structure -- see data.build_observations_mra). forward_channel_mra reuses
+# rotate_2d and sample_uniform_angle verbatim; it's forward_channel with project_1d removed,
+# not a new rotation mechanism.
+########################################################
+
+def mask_to_disk(x: torch.Tensor, background: float = -1.0) -> torch.Tensor:
+    """
+    Zero out (set to `background`) every pixel outside the inscribed circle of a square image
+    -- the largest circle that fits inside the (H, W) canvas, radius 1 in the same normalized
+    [-1, 1] coordinates rotate_2d's affine_grid uses.
+
+    Needed as a precondition for forward_channel_mra, NOT enforced by it: rotate_2d rotates a
+    SQUARE canvas inside a SQUARE sampling grid (F.affine_grid/F.grid_sample). Rotation
+    preserves radius, so an output pixel at radius r always samples the source at that same
+    radius r -- but the SQUARE boundary is not circularly symmetric (it reaches out to radius
+    sqrt(2) at the corners, only radius 1 at the edge midpoints), so which annulus-r positions
+    fall inside vs. outside the source square depends on theta. Pixels outside the square get
+    grid_sample's zero-padding (exactly -1 after rotate_2d's shifted-frame trick) -- a boundary
+    whose exact shape is therefore a deterministic function of theta mod 90 degrees, independent
+    of image content. forward_channel's project_1d sums this away into a smooth per-column bias;
+    forward_channel_mra has no projection, so it would otherwise leak a second, content-
+    independent cue to theta straight into y.
+
+    Masking the SOURCE to the inscribed disk (radius <= 1) removes this leak entirely: every
+    rotation of a disk-masked image keeps all real content within that same disk (rotation
+    preserves radius), so the annulus between radius 1 and sqrt(2) is uniformly exactly
+    `background` in the source for EVERY theta -- matching grid_sample's zero-pad value exactly,
+    so the valid-vs-zero-padded boundary becomes indistinguishable from ordinary background
+    regardless of rotation. See data.load_mnist_subset_mra, the caller that applies this once at
+    GT-load time.
+
+    Args:
+        x: (..., H, W), assumed square in the last two dims.
+        background: fill value outside the disk (always -1 here, matching [-1,1]-normalized
+            MNIST).
+
+    Returns:
+        Same shape as x.
+    """
+    H, W = x.shape[-2], x.shape[-1]
+    yy, xx = torch.meshgrid(
+        torch.linspace(-1.0, 1.0, H, device=x.device, dtype=x.dtype),
+        torch.linspace(-1.0, 1.0, W, device=x.device, dtype=x.dtype),
+        indexing="ij",
+    )
+    inside = (xx ** 2 + yy ** 2) <= 1.0
+    return torch.where(inside, x, torch.full_like(x, background))
+
+
+def forward_channel_mra(
+    x: torch.Tensor,
+    noise_std: float,
+    theta: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Rotational MRA channel: F(x) = R∘x + W -- random in-plane rotation (black fill, via
+    rotate_2d) followed directly by full-image AWGN, no projection. y stays (B, 1, H, W), the
+    same shape as x (unlike forward_channel's (B, 1, W) 1D output).
+
+    Callers must supply an x that's already been through mask_to_disk (see
+    data.load_mnist_subset_mra) -- this function doesn't enforce that itself, but the "no
+    content-independent pose leak" property documented on mask_to_disk only holds if it has.
+
+    Args:
+        x: (B, 1, H, W)
+        noise_std: float
+        theta: (B,) radians. If None, a fresh Haar-uniform angle is drawn per sample (used
+            for synthesizing y_obs). If given, that angle is reused instead of drawing a new
+            one — this is how a pool's recovered R_hat is fed back through F for ŷ = F(x̂; R̂).
+
+    Returns:
+        y: (B, 1, H, W)
+        theta_used: (B,)
+    """
+    B = x.size(0)
+    if theta is None:
+        theta = sample_uniform_angle(B, x.device)
+    x_rot = rotate_2d(x, theta)
+    y = x_rot + noise_std * torch.randn_like(x_rot)
+    return y, theta
+
+
+########################################################
 # CryoET-style 3D->2D channel: SO(3) rotation -> 2D projection -> AWGN. Rotation is always
 # represented as a (B,3,3) matrix INTERNALLY in this module (composition of the mount+tilt
 # rotations below is plain matrix multiplication — no quaternions anywhere here); the public

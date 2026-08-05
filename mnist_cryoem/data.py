@@ -7,6 +7,7 @@ from model import IMAGE_SIZE, VOL_SIZE
 from corruption import (
     forward_channel, sample_tilt_series_angles,
     forward_channel_3d, sample_tilt_series_rotations_so3,
+    forward_channel_mra, mask_to_disk,
 )
 from si import matrix_to_gram_schmidt
 
@@ -93,6 +94,58 @@ def build_observations(
     image_idx = torch.arange(n_images).repeat_interleave(corruptions_per_object * n_tilts)
     acq_idx = torch.arange(n_acq).repeat_interleave(n_tilts)
     return y_obs, theta_star, image_idx, acq_idx
+
+
+def load_mnist_subset_mra(n_images_per_class: int, image_size: int = IMAGE_SIZE,
+                          digit_classes: list[int] | None = None,
+                          seed: int | None = None) -> torch.Tensor:
+    """
+    MRA analogue of load_mnist_subset: same MNIST load, then additionally masks each digit to
+    its inscribed disk (corruption.mask_to_disk) -- REQUIRED for forward_channel_mra to satisfy
+    the literal F(x) = R∘x + W spec without leaking theta through rotate_2d's square-canvas
+    corner geometry (see corruption.mask_to_disk's docstring for the full geometric argument).
+    Mirrors how load_mnist_volumes_3d owns its own channel-specific GT geometry fix-up (a margin
+    there, to avoid SO(3)-rotation clipping; a mask here, to avoid SO(2)-rotation pose leakage)
+    rather than baking either into the shared load_mnist_subset. The CryoEM/CryoET pipelines
+    never needed this: rotate_2d/rotate_3d's corner artifacts get summed away by
+    project_1d/project_2d; forward_channel_mra has no projection step, so the artifact would
+    otherwise reach y directly.
+    """
+    x = load_mnist_subset(n_images_per_class, image_size=image_size,
+                          digit_classes=digit_classes, seed=seed)
+    return mask_to_disk(x)
+
+
+def build_observations_mra(
+    x_gt: torch.Tensor,
+    corruptions_per_object: int,
+    noise_std: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Apply the rotational-MRA channel F_MRA to each GT object `corruptions_per_object` times --
+    each repetition is a fully INDEPENDENT observation (its own Haar-uniform rotation, its own
+    AWGN draw). Unlike build_observations/build_observations_3d, there is no tilt-series /
+    acquisition structure here: classical MRA has no shared-axis or shared-mount concept, so
+    there's no acq_idx to return.
+
+    Args:
+        x_gt: (n_images, 1, H, W) -- expected to already be disk-masked (load_mnist_subset_mra)
+        corruptions_per_object: number of independent F_MRA observations per GT object
+        noise_std: float
+
+    Returns:
+        y_obs:      (n_images * corruptions_per_object, 1, H, W) — the observation set (mu)
+        theta_star: (n_images * corruptions_per_object,)         — the true rotation used per
+            observation. Diagnostic ONLY — never fed to the model, since the algorithm must
+            recover the prior without knowing the true pose.
+        image_idx:  (n_images * corruptions_per_object,)         — which source object each
+            observation came from, for grouped visualization.
+    """
+    n_images = x_gt.size(0)
+    x_expanded = x_gt.repeat_interleave(corruptions_per_object, dim=0)  # (n_obs, 1, H, W)
+    y_obs, theta_star = forward_channel_mra(x_expanded, noise_std=noise_std)
+    image_idx = torch.arange(n_images).repeat_interleave(corruptions_per_object)
+    return y_obs, theta_star, image_idx
 
 
 def load_mnist_volumes_3d(n_images_per_class: int, vol_size: int = VOL_SIZE,
