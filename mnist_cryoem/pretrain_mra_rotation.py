@@ -58,8 +58,11 @@ else:
 def select_per_class(n_images_per_class: int, digit_classes: list[int] | None,
                      seed: int | None = None) -> torch.Tensor:
     """n_images_per_class GT digits from EACH class in digit_classes (default: all 10),
-    disk-masked (data.load_mnist_subset_mra)."""
-    return load_mnist_subset_mra(n_images_per_class, digit_classes=digit_classes, seed=seed)
+    disk-masked (data.load_mnist_subset_mra). Always drawn from the MNIST TRAIN split
+    (train=True) -- must stay disjoint from main_mra_rotation.py's EM pool, which draws
+    from the test split. See mnist_cryoem/CLAUDE.md."""
+    return load_mnist_subset_mra(n_images_per_class, digit_classes=digit_classes, seed=seed,
+                                 train=True)
 
 
 SELECTION_STRATEGIES = {
@@ -135,7 +138,7 @@ if __name__ == "__main__":
     print(f"Pretrain pool: {image_pool.size(0)} images "
           f"({args.n_pretrain_images_per_class} per class, "
           f"classes={args.digit_classes or list(range(10))}, "
-          f"strategy={args.selection_strategy})")
+          f"strategy={args.selection_strategy}, split=train)")
 
     # ── Model / optimizer ────────────────────────────────────────────────
     model = ConditionalVelocityMRA(image_size=IMAGE_SIZE).to(device)
@@ -146,7 +149,8 @@ if __name__ == "__main__":
     if use_wandb:
         wandb.init(
             project="scsi-mra-rotation-mnist-pretrain",
-            config=vars(args) | {"n_params": n_params, "pool_size": image_pool.size(0)},
+            config=vars(args) | {"n_params": n_params, "pool_size": image_pool.size(0),
+                                 "dataset_split": "train"},
         )
 
     out_ckpt = Path(args.out_ckpt)

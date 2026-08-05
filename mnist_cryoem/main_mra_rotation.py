@@ -34,10 +34,10 @@ def parse_args():
     parser.add_argument("--digit_classes", type=int, nargs="+", default=None,
                         help="Which MNIST classes (0-9) to draw GT digits from "
                              "(default: all 10 classes)")
-    parser.add_argument("--n_images_per_class", type=int, default=2,
+    parser.add_argument("--n_images_per_class", type=int, default=300,
                         help="Number of ground-truth MNIST digits to use PER CLASS "
                              "in --digit_classes")
-    parser.add_argument("--corruptions_per_object", type=int, default=500,
+    parser.add_argument("--corruptions_per_object", type=int, default=1,
                         help="Number of independent F_MRA observations per GT object. Unlike "
                              "main.py/main_3d.py there is no tilt-series multiplier (no "
                              "--n_tilts here), so this directly sets "
@@ -125,14 +125,16 @@ if __name__ == "__main__":
               f"generation is reused across {args.steps_per_em} SGD steps before refreshing")
 
     # ── Load dataset ─────────────────────────────────────────────────────
-    x_gt = load_mnist_subset_mra(args.n_images_per_class, digit_classes=args.digit_classes)
+    x_gt = load_mnist_subset_mra(args.n_images_per_class, digit_classes=args.digit_classes,
+                                 train=False)
     y_obs, theta_star, image_idx = build_observations_mra(
         x_gt, corruptions_per_object=args.corruptions_per_object,
         noise_std=args.noise_std,
     )
     N_obs = y_obs.size(0)
     print(f"GT digits: {x_gt.size(0)} ({args.n_images_per_class} per class, "
-          f"classes={args.digit_classes or list(range(10))})   observations: {N_obs} "
+          f"classes={args.digit_classes or list(range(10))}, split=test)   "
+          f"observations: {N_obs} "
           f"({args.corruptions_per_object} independent MRA draws per digit)")
     print(f"GT  range=[{x_gt.min():.2f}, {x_gt.max():.2f}]")
     print(f"Obs range=[{y_obs.min():.2f}, {y_obs.max():.2f}]  shape={tuple(y_obs.shape)}\n")
@@ -160,7 +162,8 @@ if __name__ == "__main__":
         if use_wandb:
             wandb.init(
                 project="scsi-mra-rotation-mnist-overfit",
-                config=vars(args) | {"n_params": n_params, "batch_size": n_batch},
+                config=vars(args) | {"n_params": n_params, "batch_size": n_batch,
+                                     "dataset_split": "test"},
             )
 
         final_loss = overfit_single_batch(
@@ -180,6 +183,7 @@ if __name__ == "__main__":
             project="scsi-mra-rotation-mnist",
             config=vars(args) | {
                 "n_params": n_params, "N_obs": N_obs, "steps_first_em": steps_first_em,
+                "dataset_split": "test",
             },
         )
 

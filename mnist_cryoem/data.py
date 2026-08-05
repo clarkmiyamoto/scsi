@@ -14,14 +14,21 @@ from si import matrix_to_gram_schmidt
 
 def load_mnist_subset(n_images_per_class: int, image_size: int = IMAGE_SIZE,
                       digit_classes: list[int] | None = None,
-                      seed: int | None = None) -> torch.Tensor:
+                      seed: int | None = None,
+                      train: bool = True) -> torch.Tensor:
     """
-    Load n_images_per_class random MNIST training digits from EACH class in digit_classes,
+    Load n_images_per_class random MNIST digits from EACH class in digit_classes,
     normalized to [-1, 1], concatenated in digit_classes order.
 
     Args:
         n_images_per_class: how many images to draw per class (not a total count).
         digit_classes: which MNIST classes (0-9) to draw from. None = all 10 classes.
+        train: which MNIST split to draw from. True = the 60k-image train split
+            (pretrain*.py's convention), False = the 10k-image test split (main*.py's
+            convention) -- this is what keeps the pretraining pool and the EM dataset
+            disjoint by construction. Every caller must pass this explicitly; the default
+            only exists as a safety net for callers not yet updated. See
+            mnist_cryoem/CLAUDE.md's dataset-split convention.
     """
     if digit_classes is None:
         digit_classes = list(range(10))
@@ -30,7 +37,7 @@ def load_mnist_subset(n_images_per_class: int, image_size: int = IMAGE_SIZE,
         transforms.ToTensor(),
         transforms.Normalize([0.5], [0.5]),
     ])
-    dataset = datasets.MNIST("./data", train=True, download=True, transform=transform)
+    dataset = datasets.MNIST("./data", train=train, download=True, transform=transform)
     generator = torch.Generator().manual_seed(seed) if seed is not None else None
 
     chunks = []
@@ -98,7 +105,8 @@ def build_observations(
 
 def load_mnist_subset_mra(n_images_per_class: int, image_size: int = IMAGE_SIZE,
                           digit_classes: list[int] | None = None,
-                          seed: int | None = None) -> torch.Tensor:
+                          seed: int | None = None,
+                          train: bool = True) -> torch.Tensor:
     """
     MRA analogue of load_mnist_subset: same MNIST load, then additionally masks each digit to
     its inscribed disk (corruption.mask_to_disk) -- REQUIRED for forward_channel_mra to satisfy
@@ -110,9 +118,12 @@ def load_mnist_subset_mra(n_images_per_class: int, image_size: int = IMAGE_SIZE,
     never needed this: rotate_2d/rotate_3d's corner artifacts get summed away by
     project_1d/project_2d; forward_channel_mra has no projection step, so the artifact would
     otherwise reach y directly.
+
+    `train` is forwarded to load_mnist_subset unmodified -- see its docstring for the
+    train/test split convention.
     """
     x = load_mnist_subset(n_images_per_class, image_size=image_size,
-                          digit_classes=digit_classes, seed=seed)
+                          digit_classes=digit_classes, seed=seed, train=train)
     return mask_to_disk(x)
 
 
@@ -152,7 +163,8 @@ def load_mnist_volumes_3d(n_images_per_class: int, vol_size: int = VOL_SIZE,
                           inplane_size: int | None = None,
                           depth_extent: int | None = None,
                           digit_classes: list[int] | None = None,
-                          seed: int | None = None) -> torch.Tensor:
+                          seed: int | None = None,
+                          train: bool = True) -> torch.Tensor:
     """
     Build R^{p^3} MNIST volumes by extruding each 2D digit uniformly across a central depth
     band, leaving empty (-1) space at the boundary of ALL THREE axes so a generic SO(3) rotation
@@ -172,6 +184,8 @@ def load_mnist_volumes_3d(n_images_per_class: int, vol_size: int = VOL_SIZE,
             centered in D (default: round(vol_size*0.25) — a thin tablet, not a long bar;
             also closer to real cryoEM specimen geometry, thin relative to lateral extent).
         digit_classes: which MNIST classes (0-9) to draw from. None = all 10 classes.
+        train: which MNIST split to draw from -- forwarded to load_mnist_subset unmodified,
+            see its docstring for the train/test split convention.
 
     Returns:
         (N, 1, vol_size, vol_size, vol_size) in [-1, 1], background -1.
@@ -182,7 +196,8 @@ def load_mnist_volumes_3d(n_images_per_class: int, vol_size: int = VOL_SIZE,
         depth_extent = round(vol_size * 0.25)
 
     x2d = load_mnist_subset(n_images_per_class, image_size=inplane_size,
-                            digit_classes=digit_classes, seed=seed)  # (N, 1, s, s) in [-1, 1]
+                            digit_classes=digit_classes, seed=seed,
+                            train=train)  # (N, 1, s, s) in [-1, 1]
     N = x2d.size(0)
 
     pad_total = vol_size - inplane_size

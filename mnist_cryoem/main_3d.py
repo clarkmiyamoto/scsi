@@ -148,7 +148,7 @@ if __name__ == "__main__":
     # ── Load dataset ─────────────────────────────────────────────────────
     x_gt = load_mnist_volumes_3d(args.n_images_per_class, vol_size=args.vol_size,
                                  inplane_size=args.inplane_size, depth_extent=args.depth_extent,
-                                 digit_classes=args.digit_classes)
+                                 digit_classes=args.digit_classes, train=False)
     y_obs, R_star, image_idx, acq_idx = build_observations_3d(
         x_gt, corruptions_per_object=args.corruptions_per_object,
         n_tilts=args.n_tilts, tilt_increment_deg=args.tilt_increment_deg,
@@ -156,8 +156,8 @@ if __name__ == "__main__":
     )
     N_obs = y_obs.size(0)
     print(f"GT volumes: {x_gt.size(0)} ({args.n_images_per_class} per class, "
-          f"classes={args.digit_classes or list(range(10))}, vol_size={args.vol_size})   "
-          f"observations: {N_obs} "
+          f"classes={args.digit_classes or list(range(10))}, vol_size={args.vol_size}, "
+          f"split=test)   observations: {N_obs} "
           f"({args.corruptions_per_object} acquisitions x {args.n_tilts} tilts per volume)")
     print(f"GT  range=[{x_gt.min():.2f}, {x_gt.max():.2f}]")
     print(f"Obs range=[{y_obs.min():.2f}, {y_obs.max():.2f}]\n")
@@ -184,7 +184,8 @@ if __name__ == "__main__":
         if use_wandb:
             wandb.init(
                 project="scsi-cryoet-mnist3d-overfit",
-                config=vars(args) | {"n_params": n_params, "batch_size": n_batch},
+                config=vars(args) | {"n_params": n_params, "batch_size": n_batch,
+                                     "dataset_split": "test"},
             )
 
         final_loss = overfit_single_batch(
@@ -204,6 +205,7 @@ if __name__ == "__main__":
             project="scsi-cryoet-mnist3d",
             config=vars(args) | {
                 "n_params": n_params, "N_obs": N_obs, "steps_first_em": steps_first_em,
+                "dataset_split": "test",
             },
         )
 

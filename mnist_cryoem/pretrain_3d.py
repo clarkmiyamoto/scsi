@@ -56,10 +56,12 @@ else:
 def select_per_class(n_images_per_class: int, digit_classes: list[int] | None,
                      vol_size: int, inplane_size: int | None, depth_extent: int | None,
                      seed: int | None = None) -> torch.Tensor:
-    """n_images_per_class GT volumes from EACH class in digit_classes (default: all 10)."""
+    """n_images_per_class GT volumes from EACH class in digit_classes (default: all 10).
+    Always drawn from the MNIST TRAIN split (train=True) -- must stay disjoint from
+    main_3d.py's EM pool, which draws from the test split. See mnist_cryoem/CLAUDE.md."""
     return load_mnist_volumes_3d(n_images_per_class, vol_size=vol_size,
                                  inplane_size=inplane_size, depth_extent=depth_extent,
-                                 digit_classes=digit_classes, seed=seed)
+                                 digit_classes=digit_classes, seed=seed, train=True)
 
 
 SELECTION_STRATEGIES = {
@@ -144,7 +146,7 @@ if __name__ == "__main__":
     print(f"Pretrain pool: {volume_pool.size(0)} volumes "
           f"({args.n_pretrain_images_per_class} per class, "
           f"classes={args.digit_classes or list(range(10))}, "
-          f"strategy={args.selection_strategy}, vol_size={args.vol_size})")
+          f"strategy={args.selection_strategy}, vol_size={args.vol_size}, split=train)")
 
     # ── Model / optimizer ────────────────────────────────────────────────
     model = ConditionalVelocityCryoET3D(vol_size=args.vol_size).to(device)
@@ -155,7 +157,8 @@ if __name__ == "__main__":
     if use_wandb:
         wandb.init(
             project="scsi-cryoet-mnist3d-pretrain",
-            config=vars(args) | {"n_params": n_params, "pool_size": volume_pool.size(0)},
+            config=vars(args) | {"n_params": n_params, "pool_size": volume_pool.size(0),
+                                 "dataset_split": "train"},
         )
 
     out_ckpt = Path(args.out_ckpt)
