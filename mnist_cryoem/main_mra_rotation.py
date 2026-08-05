@@ -55,6 +55,8 @@ def parse_args():
     parser.add_argument("--init_ckpt", type=str, default=None,
                             help="Path to a pretrained state_dict to load as Theta^(0) before "
                                  "the EM loop starts")
+    parser.add_argument("--ckpt_dir", type=str, default="mnist_mra_rotation_checkpoints",
+                        help="Directory EM-loop checkpoints are written to")
     parser.add_argument("--n_em_steps", type=int, default=200,
                         help="K: number of outer EM iterations")
     parser.add_argument("--steps_per_em", type=int, default=200,
@@ -187,7 +189,7 @@ if __name__ == "__main__":
             },
         )
 
-    ckpt_dir = Path("mnist_mra_rotation_checkpoints")
+    ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(exist_ok=True)
 
     run_em_loop_mra(
