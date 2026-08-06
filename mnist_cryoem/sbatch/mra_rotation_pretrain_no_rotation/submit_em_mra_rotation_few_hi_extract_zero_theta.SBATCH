@@ -11,14 +11,17 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=cm6627@nyu.edu
 
-# Zero-theta-pretrain warm-start ablation (rotational-MRA), Group C (subclass extraction):
-# pretrained broader than the EM problem. Same as em_mra_rotation_few_hi_extract, but
-# warm-started from pretrain_mra_rotation_few_hi_zero_theta.pt -- pretrained with theta fixed
-# to 0 (F_MRA degenerates to y = x + W, image branch only, pose head never trained on nonzero
-# rotation). The EM stage itself is unchanged (real sampled rotation, restricted to digit 8):
-# tests whether the pose branch can bootstrap from scratch during EM despite this image-only
-# warm start. Compare against em_mra_rotation_few_hi_extract (same EM problem, ordinary
-# pretrain) and em_mra_rotation_few_hi_matched_zero_theta (same pretrain, no extraction).
+# Zero-theta + no-pose-head pretrain warm-start ablation (rotational-MRA), Group C (subclass
+# extraction): pretrained broader than the EM problem. Same as em_mra_rotation_few_hi_extract,
+# but warm-started from pretrain_mra_rotation_few_hi_zero_theta.pt -- pretrained with theta
+# fixed to 0 (F_MRA degenerates to y = x + W, no rotation) AND --no_pose_head (no pose branch
+# at all, pure image-only Theta^(0)). The EM stage also runs --no_pose_head (required to load
+# a checkpoint with no pose_branch.* keys) against the unchanged real-rotation forward channel
+# (restricted to digit 8), so train_mstep_mra marginalizes over R instead of estimating it:
+# tests whether the image branch alone, warm-started fully pose-free, can still recover a good
+# prior under real rotations when restricted to a single extracted subclass. Compare against
+# em_mra_rotation_few_hi_extract (same EM problem, ordinary pretrain+pose) and
+# em_mra_rotation_few_hi_matched_zero_theta (same pretrain, no extraction).
 
 cd /scratch/cm6627/scsi/mnist_cryoem
 
@@ -27,4 +30,5 @@ export WANDB_NAME=em_mra_rotation_few_hi_extract_zero_theta
 uv run python main_mra_rotation.py \
     --init_ckpt mnist_mra_rotation_checkpoints/pretrain_mra_rotation_few_hi_zero_theta.pt \
     --digit_classes 8 \
+    --no_pose_head \
     --ckpt_dir mnist_mra_rotation_checkpoints/em_few_hi_extract_zero_theta

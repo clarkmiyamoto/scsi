@@ -13,8 +13,10 @@
 
 # Pretrain matrix for rotational-MRA channel, axis: class coverage x pool size/class.
 # all_lo_zero_theta: same as all_lo (ALL 10 digit classes, 32 images/class) but with
-# --zero_theta: theta is fixed to 0 every step instead of sampled, so F_MRA degenerates to
-# y = x + W (no rotation) -- isolates the image branch from pose-branch noise.
+# --zero_theta AND --no_pose_head: theta is fixed to 0 every step instead of sampled (F_MRA
+# degenerates to y = x + W, no rotation) AND the pose branch is dropped entirely
+# (model.use_pose_head=False) -- pure image-only pretraining, maximally isolated from any
+# pose-branch signal.
 # NOTE: --digit_classes omitted -> defaults to all 10 classes.
 
 cd /scratch/cm6627/scsi/mnist_cryoem
@@ -26,4 +28,5 @@ uv run python pretrain_mra_rotation.py \
     --n_steps 10000 \
     --batch_size 256 \
     --zero_theta \
+    --no_pose_head \
     --out_ckpt mnist_mra_rotation_checkpoints/pretrain_mra_rotation_all_lo_zero_theta.pt
