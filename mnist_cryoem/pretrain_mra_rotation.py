@@ -92,6 +92,12 @@ def parse_args():
                         help="AWGN std, added directly to the full [-1,1]-range rotated image "
                              "— matches main_mra_rotation.py's default (0.3), NOT "
                              "pretrain.py's 1.0 (calibrated for the 1D-projected channel).")
+    parser.add_argument("--zero_theta", action="store_true",
+                        help="Debug mode: fix theta=0 every step instead of sampling "
+                             "sample_uniform_angle (i.e. F_MRA degenerates to y = x + W, no "
+                             "rotation). Pose branch still trains against this constant target "
+                             "— useful for isolating the image branch from pose-branch noise. "
+                             "pretrain_mra_rotation.py only, not part of the SCSI algorithm.")
     parser.add_argument("--n_steps", type=int, default=5000,
                         help="Flat supervised SGD steps (no outer/inner loop)")
     parser.add_argument("--interpolant_style", type=str, default="linear",
@@ -164,7 +170,10 @@ if __name__ == "__main__":
     for step in tqdm(range(args.n_steps), desc="pretrain"):
         idx = torch.randint(0, N, (args.batch_size,))
         x_batch = image_pool[idx]                       # canonical GT, untouched
-        theta_batch = sample_uniform_angle(args.batch_size, device)
+        if args.zero_theta:
+            theta_batch = torch.zeros(args.batch_size, device=device)
+        else:
+            theta_batch = sample_uniform_angle(args.batch_size, device)
         y_batch, _ = forward_channel_mra(x_batch, noise_std=args.noise_std, theta=theta_batch)
 
         loss, loss_img, loss_pose = loss_func_joint(
