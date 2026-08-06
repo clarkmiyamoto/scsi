@@ -45,15 +45,21 @@ def propose_estep(
     batch_size: int = 256,
     method: str = "euler",
     device: torch.device = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     E-step / Phi^(k-1): run the joint ODE (ode.sample_joint) conditioned on y_obs_subset to
     produce (x_hat, R_hat) for every observation in the subset. `y_obs_subset` may be the whole
     dataset or a small slice, depending on how the caller sized `pool_size` (see main.py's
     literal-vs-amortized parameterization).
+
+    R_hat is OPTIONAL: if `model` has no pose/latent branch (model.pose_branch is None, see
+    model.ConditionalVelocityMRA's use_pose_head), ode.sample_joint returns theta_batch=None
+    every chunk, and theta_pool is returned as None rather than a concatenated tensor. Callers
+    (scsi.train_mstep_mra, wandb_logging.log_em_pool_diagnostics) already treat it as Optional.
     """
     model.eval()
     N = y_obs_subset.size(0)
+    has_pose = getattr(model, "pose_branch", None) is not None
     x_chunks, theta_chunks = [], []
     y_gpu = y_obs_subset.to(device)
 
@@ -64,10 +70,11 @@ def propose_estep(
         x_batch, theta_batch = sample_joint(model, z_image, y_gpu[start:end],
                                             n_steps=n_steps, method=method)
         x_chunks.append(x_batch.cpu())
-        theta_chunks.append(theta_batch.cpu())
+        if has_pose:
+            theta_chunks.append(theta_batch.cpu())
 
     x_pool = torch.cat(x_chunks, dim=0)
-    theta_pool = torch.cat(theta_chunks, dim=0)
+    theta_pool = torch.cat(theta_chunks, dim=0) if has_pose else None
     print(f"    pool  x range=[{x_pool.min():.3f}, {x_pool.max():.3f}]"
           f"  mean={x_pool.mean():.4f}  std={x_pool.std():.4f}")
 
@@ -85,27 +92,52 @@ def propose_estep(
 
 def loss_func_joint(
     model: nn.Module,
-    x_hat: torch.Tensor,      # (B, 1, H, W) — image branch's x1 target
-    theta_hat: torch.Tensor,  # (B,)          — pose branch's x1 target
-    y: torch.Tensor,          # (B, 1, W)     — observation to condition on
+    x_hat: torch.Tensor,              # (B, 1, H, W) — image branch's x1 target
+    theta_hat: torch.Tensor | None,   # (B,)          — pose branch's x1 target, or None
+    y: torch.Tensor,                  # (B, 1, W)     — observation to condition on
     style: str = "linear",
     pose_loss_weight: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Returns (total_loss, image_loss.detach(), pose_loss.detach()) for separate logging."""
+    """
+    Returns (total_loss, image_loss.detach(), pose_loss.detach()) for separate logging.
+
+    The pose/latent branch is OPTIONAL, gated ONCE on `model.pose_branch is not None` (the
+    same single source of truth ode.sample_joint and scsi.propose_estep use) -- NOT on whether
+    `theta_hat` happens to be non-None. This matters: a caller with a pose-free model may still
+    legitimately pass a real theta_hat (e.g. main_mra_rotation.py's --overfit path, which needs
+    SOME angle to render y regardless of whether the model estimates one) -- gating on
+    `theta_hat is not None` there would run pose_interpolant for a value the model was always
+    going to ignore. When `model.pose_branch is None`: theta_z/pose_interpolant are skipped
+    entirely, `model(..., None, ...)` is called, and loss_pose is a constant zero tensor
+    (nothing to backprop, nothing informative to log). `theta_hat` must be non-None whenever
+    `model.pose_branch is not None` -- the converse (a real pose branch called with
+    theta_t=None) crashes inside PoseHead.forward, which is the correct loud failure.
+
+    This is the general F: X x R -> Y pattern: R is an optional per-sample latent the loss's
+    interpolant/regression targets happen to include; dropping it drops one branch of this
+    function, not a parallel loss function.
+    """
     B = x_hat.size(0)
     t = torch.rand(B, device=x_hat.device)
 
     z_image = torch.randn_like(x_hat)
-    theta_z = sample_uniform_angle(B, x_hat.device)
-
     t4 = t[:, None, None, None]
     I_t, I_dot_t = interpolant(z_image, x_hat, t4, style)
-    theta_t, theta_dot_t = pose_interpolant(theta_z, theta_hat, t)
+
+    has_pose = getattr(model, "pose_branch", None) is not None
+    if has_pose:
+        theta_z = sample_uniform_angle(B, x_hat.device)
+        theta_t, theta_dot_t = pose_interpolant(theta_z, theta_hat, t)
+    else:
+        theta_t, theta_dot_t = None, None
 
     v_x, v_theta = model(I_t, theta_t, t, y)
 
     loss_image = F.mse_loss(v_x, I_dot_t)
-    loss_pose = F.mse_loss(v_theta, theta_dot_t)
+    if has_pose:
+        loss_pose = F.mse_loss(v_theta, theta_dot_t)
+    else:
+        loss_pose = torch.zeros((), device=x_hat.device)
     loss = loss_image + pose_loss_weight * loss_pose
     return loss, loss_image.detach(), loss_pose.detach()
 
@@ -193,8 +225,8 @@ def train_mstep(
 def train_mstep_mra(
     model: nn.Module,
     opt: torch.optim.Optimizer,
-    x_pool: torch.Tensor,      # (N, 1, H, W) — this iteration's Phi^(k-1)-generated x_hat's
-    theta_pool: torch.Tensor,  # (N,)          — this iteration's Phi^(k-1)-generated R_hat's
+    x_pool: torch.Tensor,              # (N, 1, H, W) — this iteration's Phi^(k-1) x_hat's
+    theta_pool: torch.Tensor | None,   # (N,) this iteration's Phi^(k-1) R_hat's, or None
     noise_std: float,
     style: str,
     pose_loss_weight: float,
@@ -214,9 +246,16 @@ def train_mstep_mra(
 
     ŷ = F(x_pool; theta_pool) is recomputed fresh each batch: pose fixed to that sample's
     Phi^(k-1)-recovered R_hat, noise redrawn every time — the literal ŷ = F(x̂; R̂) term.
+
+    theta_pool is OPTIONAL (None when model.pose_branch is None — see
+    model.ConditionalVelocityMRA's use_pose_head docstring). `has_pose` is re-derived from
+    `model` here too (not inferred from `theta_pool is not None`) so this function has the same
+    single source of truth as propose_estep/loss_func_joint/sample_joint, rather than trusting
+    that whoever produced theta_pool got it right.
     """
     N = x_pool.size(0)
     model.train()
+    has_pose = getattr(model, "pose_branch", None) is not None
 
     perm = torch.randperm(N)
     ptr = 0
@@ -230,8 +269,13 @@ def train_mstep_mra(
         ptr += batch_size
 
         x_batch = x_pool[idx].to(device)
-        theta_batch = theta_pool[idx].to(device)
+        theta_batch = theta_pool[idx].to(device) if has_pose else None
 
+        # theta_batch=None (no pose head) falls into forward_channel_mra's OWN theta=None
+        # branch, drawing a FRESH Haar-uniform rotation here instead of re-applying a
+        # recovered R_hat — i.e. the M-step MARGINALIZES over the unobserved rotation rather
+        # than holding a believed one fixed. Same call, same line, different meaning — see
+        # model.ConditionalVelocityMRA's use_pose_head docstring.
         y_batch, _ = forward_channel_mra(x_batch, noise_std=noise_std, theta=theta_batch)
 
         loss, loss_img, loss_pose = loss_func_joint(

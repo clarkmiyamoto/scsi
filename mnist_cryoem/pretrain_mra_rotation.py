@@ -98,6 +98,14 @@ def parse_args():
                              "rotation). Pose branch still trains against this constant target "
                              "— useful for isolating the image branch from pose-branch noise. "
                              "pretrain_mra_rotation.py only, not part of the SCSI algorithm.")
+    parser.add_argument("--no_pose_head", action="store_true",
+                        help="Drop the SO(2) pose/latent branch entirely (model.py's "
+                             "use_pose_head=False) — see main_mra_rotation.py's flag of the "
+                             "same name. A random theta is still drawn each step to render "
+                             "y_batch (the forward channel itself is untouched); the model "
+                             "just never sees/predicts it. Produces a checkpoint that "
+                             "main_mra_rotation.py --init_ckpt must load with a MATCHING "
+                             "--no_pose_head, since the state_dict has no pose_branch.* keys.")
     parser.add_argument("--n_steps", type=int, default=5000,
                         help="Flat supervised SGD steps (no outer/inner loop)")
     parser.add_argument("--interpolant_style", type=str, default="linear",
@@ -147,7 +155,11 @@ if __name__ == "__main__":
           f"strategy={args.selection_strategy}, split=train)")
 
     # ── Model / optimizer ────────────────────────────────────────────────
-    model = ConditionalVelocityMRA(image_size=IMAGE_SIZE).to(device)
+    model = ConditionalVelocityMRA(image_size=IMAGE_SIZE,
+                                   use_pose_head=not args.no_pose_head).to(device)
+    if args.no_pose_head:
+        print("Mode: NO POSE HEAD — model directly learns E[I_dot_t | I_t=x, Y=y], "
+              "marginalizing over the unobserved rotation instead of estimating it.")
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Parameters: {n_params:,}\n")

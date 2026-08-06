@@ -23,15 +23,28 @@ def sample_joint(
     y: torch.Tensor,         # (B, 1, W) observation to condition on
     n_steps: int = 50,
     method: str = "euler",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Jointly integrates the image and pose branches from t=0 (noise) to t=1 (data)."""
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """
+    Jointly integrates the image and pose/latent branches from t=0 (noise) to t=1 (data).
+
+    The pose/latent state R is OPTIONAL: `model` is the single source of truth for whether one
+    exists (`model.pose_branch is not None` -- see model.ConditionalVelocityMRA's use_pose_head
+    docstring). If absent, theta is never initialized or updated -- only the image branch
+    integrates -- and the returned theta is None. Every caller of this function
+    (scsi.propose_estep, wandb_logging.log_reconstruction_grid_mra) must treat the second
+    return value as Optional. This is the general F: X x R -> Y pattern applied to the
+    integrator: R can be any per-sample nuisance/latent the forward channel depends on (here
+    an SO(2) angle), and dropping it should only ever require this function to skip touching
+    it, not a parallel copy of the integration loop.
+    """
     model.eval()
     if method != "euler":
         raise ValueError(f"Unknown method: {method!r} (only 'euler' is implemented)")
 
+    has_pose = getattr(model, "pose_branch", None) is not None
     B = z_image.size(0)
     x = z_image
-    theta = sample_uniform_angle(B, z_image.device)
+    theta = sample_uniform_angle(B, z_image.device) if has_pose else None
     dt = 1.0 / n_steps
 
     for i in range(n_steps):
@@ -39,7 +52,8 @@ def sample_joint(
         t_frac = torch.full((B,), t_val, device=z_image.device)
         v_x, v_theta = model(x, theta, t_frac, y)
         x = x + v_x * dt
-        theta = wrap_to_pi(theta + v_theta * dt)
+        if has_pose:
+            theta = wrap_to_pi(theta + v_theta * dt)
 
     return x, theta
 

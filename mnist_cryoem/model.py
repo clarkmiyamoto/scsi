@@ -157,8 +157,18 @@ class ConditionalVelocityMRA(nn.Module):
     never projects, so y is natively (B,1,H,W) -- unlike ConditionalVelocityCryoEM.forward, this
     wrapper does NOT broadcast (no y.unsqueeze(-2).expand(...)); y is passed straight through to
     both branches as-is. First wrapper in this file where x_t and y already share a shape.
+
+    use_pose_head=False drops the pose/latent branch entirely (self.pose_branch = None): the
+    model becomes a pure image-conditional velocity field b(x_t, t, y) with no attempt to
+    estimate the rotation R that produced y from x -- i.e. it directly learns
+    E[I_dot_t | I_t=x_t, Y=y], marginalizing over R rather than jointly estimating it. This is
+    THE single source of truth for "does this model have a latent branch" that ode.sample_joint,
+    scsi.propose_estep, scsi.loss_func_joint, and scsi.train_mstep_mra all key off of (via
+    `getattr(model, "pose_branch", None) is not None`) to decide whether to touch theta at all --
+    see their docstrings for how None propagates from here outward. ConditionalVelocityCryoEM
+    (main.py's channel) intentionally has no such flag: its pose branch is unconditional.
     """
-    def __init__(self, image_size=IMAGE_SIZE, arch: str = "dit"):
+    def __init__(self, image_size=IMAGE_SIZE, arch: str = "dit", use_pose_head: bool = True):
         super().__init__()
         self.image_size = image_size
         if arch == "dit":
@@ -167,13 +177,19 @@ class ConditionalVelocityMRA(nn.Module):
             self.image_branch = ConditionalUNet2D(image_size=image_size)
         else:
             raise ValueError(f"Unknown arch: {arch!r}. Choose 'dit' or 'unet'.")
-        self.pose_branch = PoseHead(image_size=image_size)
+        self.pose_branch = PoseHead(image_size=image_size) if use_pose_head else None
 
-    def forward(self, x_t: torch.Tensor, theta_t: torch.Tensor,
-                t_frac: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # x_t: (B, 1, H, W)   theta_t: (B,)   t_frac: (B,) in [0,1]   y: (B, 1, H, W)
+    def forward(self, x_t: torch.Tensor, theta_t: torch.Tensor | None,
+                t_frac: torch.Tensor, y: torch.Tensor,
+                ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # x_t: (B, 1, H, W)   theta_t: (B,) or None   t_frac: (B,) in [0,1]   y: (B, 1, H, W)
+        # theta_t is only ever None when self.pose_branch is None (see class docstring) --
+        # a real pose branch called with theta_t=None will crash inside PoseHead.forward, which
+        # is the correct loud failure for that caller-side inconsistency.
         t_int = (t_frac * INTEGRATION_SCALE).long()
         v_x = self.image_branch(x_t, t_int, y)
+        if self.pose_branch is None:
+            return v_x, None
         v_theta = self.pose_branch(x_t, y, theta_t, t_frac)
         return v_x, v_theta
 

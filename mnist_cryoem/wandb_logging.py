@@ -132,7 +132,7 @@ def log_pretrain_reconstruction(
 
 
 def log_em_pool_diagnostics(
-    theta_pool: torch.Tensor,    # (n,)      this iteration's Phi^(k-1)-recovered rotations
+    theta_pool: torch.Tensor | None,  # (n,)  this iteration's Phi^(k-1)-recovered rotations
     theta_star: torch.Tensor,    # (N_obs,)  diagnostic only, never used in training
     pool_indices: torch.Tensor,  # (n,) indices into theta_star for this iteration's pool
     wandb_step: int,
@@ -145,8 +145,12 @@ def log_em_pool_diagnostics(
     (theta_star) — NOT a training signal, never fed back into the loss. Logged at
     `wandb_step` (see log_train_step) for the same non-decreasing-step reason documented on
     log_reconstruction_grid below.
+
+    theta_pool is None when the model has no pose/latent branch (see
+    model.ConditionalVelocityMRA's use_pose_head docstring) — there is nothing to diagnose in
+    that case, so this is a no-op.
     """
-    if not use_wandb:
+    if not use_wandb or theta_pool is None:
         return
     circ_err = wrap_to_pi(theta_pool - theta_star[pool_indices]).abs().mean().item()
     wandb.log({"em/circular_error": circ_err}, step=wandb_step)
@@ -331,7 +335,10 @@ def log_reconstruction_grid_mra(
               learned (image, pose) prior is only identifiable up to a global rotation, so a
               plateau at a nonzero constant isn't necessarily a training failure) by
               recorrupting at the known true angle rather than the recovered one.
-    Column titles show the true vs. recovered angle in degrees.
+    Column titles show the true vs. recovered angle in degrees — or just the true angle if
+    `model` has no pose/latent branch (ode.sample_joint returns theta_hat=None in that case;
+    see model.ConditionalVelocityMRA's use_pose_head docstring). Row 3 is unaffected either
+    way, since it already recorrupts at theta_star (true angle), never theta_hat.
 
     Runs its own small E-step (ode.sample_joint) directly rather than reusing
     scsi.py::propose_estep — same circular-import reasoning as log_reconstruction_grid
@@ -361,9 +368,15 @@ def log_reconstruction_grid_mra(
         recorrupt_imgs.append(recorrupt[0, 0].cpu())
 
         true_deg = theta_star[o].item() * 180.0 / torch.pi
-        rec_deg = theta_hat[0].item() * 180.0 / torch.pi
         tag = " (fixed)" if o == fixed_obs_id else ""
-        col_titles.append(f"obs={o}{tag}\ntrue θ {true_deg:.0f}° rec θ {rec_deg:.0f}°")
+        # theta_hat is None when the model has no pose/latent branch (use_pose_head=False) --
+        # the recorrupt row above already used the TRUE angle regardless, so only the title's
+        # "recovered" annotation needs to disappear.
+        if theta_hat is not None:
+            rec_deg = theta_hat[0].item() * 180.0 / torch.pi
+            col_titles.append(f"obs={o}{tag}\ntrue θ {true_deg:.0f}° rec θ {rec_deg:.0f}°")
+        else:
+            col_titles.append(f"obs={o}{tag}\ntrue θ {true_deg:.0f}°")
 
     model.train()
 
@@ -438,6 +451,13 @@ def log_pretrain_reconstruction_mra(
     shows direct self-consistency: does the model's own (x_hat, theta_hat) reproduce something
     resembling the y it was conditioned on.
 
+    theta_hat is None when `model` has no pose/latent branch (model.pose_branch is None — see
+    model.ConditionalVelocityMRA's use_pose_head docstring). There is then no "recovered angle"
+    self-consistency check to run: row 3 falls back to recorrupting at the TRUE angle
+    theta_true instead (same convention as log_reconstruction_grid_mra), the row label changes
+    to say so, and circ_err / "pretrain/circular_error" are skipped entirely rather than
+    computed against a None.
+
     sample_joint leaves the model in eval() mode (it doesn't restore it) — this function
     restores model.train() before returning so the caller's training loop is unaffected.
     """
@@ -452,8 +472,14 @@ def log_pretrain_reconstruction_mra(
     x_hat, theta_hat = sample_joint(model, z_image, y_obs, n_steps=sample_steps)
     model.train()
 
-    recorrupt, _ = forward_channel_mra(x_hat, noise_std=0.0, theta=theta_hat)
-    circ_err = wrap_to_pi(theta_hat - theta_true).abs().mean().item()
+    if theta_hat is not None:
+        recorrupt, _ = forward_channel_mra(x_hat, noise_std=0.0, theta=theta_hat)
+        circ_err = wrap_to_pi(theta_hat - theta_true).abs().mean().item()
+        recorrupt_label = "F(x_hat; rec θ)"
+    else:
+        recorrupt, _ = forward_channel_mra(x_hat, noise_std=0.0, theta=theta_true)
+        circ_err = None
+        recorrupt_label = "F(x_hat; true θ)"
 
     gt_imgs = x_gt[:, 0].cpu()
     obs_imgs = y_obs[:, 0].cpu()
@@ -464,7 +490,7 @@ def log_pretrain_reconstruction_mra(
         (gt_imgs, "GT digit"),
         (obs_imgs, "Obs y"),
         (gen_imgs, "Model x_hat"),
-        (recorrupt_imgs, "F(x_hat; rec θ)"),
+        (recorrupt_imgs, recorrupt_label),
     ]
     fig, axes = plt.subplots(4, n, figsize=(2 * n, 8), squeeze=False)
     for r, (_, label) in enumerate(rows):
@@ -493,13 +519,19 @@ def log_pretrain_reconstruction_mra(
             axes[r, j].set_xticks([])
             axes[r, j].set_yticks([])
 
-    fig.suptitle(f"pretrain step {step}  |  mean circular error={circ_err:.3f} rad",
-                fontsize=11)
+    if circ_err is not None:
+        fig.suptitle(f"pretrain step {step}  |  mean circular error={circ_err:.3f} rad",
+                    fontsize=11)
+    else:
+        fig.suptitle(f"pretrain step {step}  |  no pose head (circular error n/a)",
+                    fontsize=11)
     plt.tight_layout()
 
     if use_wandb:
-        wandb.log({"pretrain/reconstruction": wandb.Image(fig),
-                  "pretrain/circular_error": circ_err}, step=step)
+        log_dict = {"pretrain/reconstruction": wandb.Image(fig)}
+        if circ_err is not None:
+            log_dict["pretrain/circular_error"] = circ_err
+        wandb.log(log_dict, step=step)
     else:
         from pathlib import Path
         out = Path("mnist_mra_rotation_eval")

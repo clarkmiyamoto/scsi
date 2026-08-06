@@ -74,6 +74,16 @@ def parse_args():
     parser.add_argument("--arch", type=str, default="dit", choices=["dit", "unet"],
                         help="Image branch architecture: DiTTransformer2DModel or "
                              "UNet2DModel (both from diffusers)")
+    parser.add_argument("--no_pose_head", action="store_true",
+                        help="Drop the SO(2) pose/latent branch entirely (model.py's "
+                             "use_pose_head=False). The model becomes a pure image-conditional "
+                             "velocity field b(x_t, t, y), directly learning "
+                             "E[I_dot_t | I_t=x, Y=y] and marginalizing over the unobserved "
+                             "rotation R instead of estimating it. propose_estep/loss_func_joint/"
+                             "train_mstep_mra/sample_joint all detect this from the model itself "
+                             "(model.pose_branch is None) and skip the pose branch accordingly "
+                             "-- see scsi.py/ode.py docstrings. --pose_loss_weight becomes inert "
+                             "(multiplies a constant zero loss_pose).")
 
     # Stochastic Interpolant / Training
     parser.add_argument("--interpolant_style", type=str, default="linear",
@@ -145,7 +155,11 @@ if __name__ == "__main__":
     # The optimizer is created once and persists across every EM outer iteration (see
     # scsi.py::train_mstep docstring) — required for --steps_per_em as low as 1 to be a fair
     # test of the literal pseudocode rather than being crippled by constantly-reset Adam state.
-    model = ConditionalVelocityMRA(image_size=IMAGE_SIZE, arch=args.arch).to(device)
+    model = ConditionalVelocityMRA(image_size=IMAGE_SIZE, arch=args.arch,
+                                   use_pose_head=not args.no_pose_head).to(device)
+    if args.no_pose_head:
+        print("Mode: NO POSE HEAD — model directly learns E[I_dot_t | I_t=x, Y=y], "
+              "marginalizing over the unobserved rotation instead of estimating it.")
     if args.init_ckpt is not None:
         model.load_state_dict(torch.load(args.init_ckpt, map_location=device))
         print(f"Loaded initial teacher weights <- {args.init_ckpt}")
