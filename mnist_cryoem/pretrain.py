@@ -10,6 +10,7 @@ from model import ConditionalVelocityCryoEM, IMAGE_SIZE
 from corruption import forward_channel, sample_uniform_angle
 from scsi import loss_func_joint
 from wandb_logging import log_train_step, log_pretrain_reconstruction
+from warmup import backproject_pool, classical_target_for_display
 
 try:
     import wandb
@@ -136,54 +137,20 @@ def build_classical_recon_pool(
             entry came from; not used in training, only by the wandb panel to pick one
             representative reconstruction per displayed object
     """
-    from classical_recon import backproject  # lazy: keeps classical_recon.py's skimage import
-                                              # off the default (GT-supervised) path; harmless
-                                              # either way since wandb_logging's matplotlib.use(
-                                              # "Agg") has already run by the time this fires
-
-    image_size = x_gt.size(-1)
+    # y_obs/theta_star/image_idx/acq_idx -- this is D_Y. The per-acquisition backproject +
+    # calibration loop (D_Y -> D_X) is shared with main.py's --warmup_steps phase, which runs the
+    # SAME logic against its own EM-loop observation pool instead of building a fresh one here --
+    # see warmup.py::backproject_pool's docstring.
     y_obs, theta_star, image_idx, acq_idx = build_observations(
         x_gt, corruptions_per_object=corruptions_per_object, n_tilts=n_tilts,
         tilt_increment_deg=tilt_increment_deg, noise_std=noise_std,
     )
-    n_acq = x_gt.size(0) * corruptions_per_object
-
-    x_recon_chunks = []
-    for a in range(n_acq):
-        mask = acq_idx == a
-        x_hat_a = backproject(y_obs[mask], theta_star[mask], image_size,
-                              filtered=True, filter_type=recon_filter_type)  # (1,1,H,W)
-        x_recon_chunks.append(x_hat_a.expand(int(mask.sum()), -1, -1, -1))
-    # Concatenation order matches y_obs/theta_star's order exactly: build_observations already
-    # keeps each acquisition's observations contiguous and in tilt order.
-    x_recon_pool = torch.cat(x_recon_chunks, dim=0)
-
-    if recon_calibration == "affine_clamp":
-        a_coef = x_gt.std() / x_recon_pool.std().clamp_min(1e-8)
-        b_coef = x_gt.mean() - a_coef * x_recon_pool.mean()
-        x_recon_pool = (a_coef * x_recon_pool + b_coef).clamp(-1.0, 1.0)
-    elif recon_calibration != "none":
-        raise ValueError(f"Unknown recon_calibration: {recon_calibration!r}")
+    x_recon_pool = backproject_pool(
+        y_obs, theta_star, acq_idx, x_gt,
+        recon_filter_type=recon_filter_type, recon_calibration=recon_calibration,
+    )
 
     return x_recon_pool, theta_star, y_obs, image_idx
-
-
-def _classical_target_for_display(
-    x_recon_pool: torch.Tensor | None,
-    image_idx: torch.Tensor | None,
-    n_images: int,
-) -> torch.Tensor | None:
-    """
-    One representative calibrated reconstruction per source object, aligned with image_pool's
-    own object order -- for wandb_logging.log_pretrain_reconstruction's optional
-    classical_target row. Robust to --corruptions_per_object > 1 (picks that object's FIRST
-    acquisition's reconstruction, not a stride-based index, since image_idx's grouping is the
-    only thing this function should rely on). Returns None when not in classical-recon mode
-    (x_recon_pool is None), which log_pretrain_reconstruction treats as "omit the row."
-    """
-    if x_recon_pool is None:
-        return None
-    return torch.stack([x_recon_pool[image_idx == i][0] for i in range(n_images)])
 
 
 def parse_args():
@@ -367,7 +334,7 @@ if __name__ == "__main__":
             log_pretrain_reconstruction(
                 model, image_pool, noise_std=args.noise_std,
                 sample_steps=args.sample_steps, step=step, use_wandb=use_wandb,
-                classical_target=_classical_target_for_display(
+                classical_target=classical_target_for_display(
                     x_recon_pool, recon_image_idx, image_pool.size(0)),
             )
 
@@ -375,7 +342,7 @@ if __name__ == "__main__":
         log_pretrain_reconstruction(
             model, image_pool, noise_std=args.noise_std,
             sample_steps=args.sample_steps, step=args.n_steps - 1, use_wandb=use_wandb,
-            classical_target=_classical_target_for_display(
+            classical_target=classical_target_for_display(
                 x_recon_pool, recon_image_idx, image_pool.size(0)),
         )
 

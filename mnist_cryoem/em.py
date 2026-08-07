@@ -32,12 +32,22 @@ def run_em_loop(
     device: torch.device,
     use_wandb: bool,
     ckpt_dir: Path,
+    global_step_start: int = 0,
 ) -> None:
+    """
+    `global_step_start` seeds the wandb step counter instead of always resetting to 0 -- lets a
+    caller-side phase that already logged into the SAME wandb run (main.py's --warmup_steps
+    phase, warmup.py::run_classical_recon_warmup) hand off a continuing, non-decreasing step
+    counter rather than colliding with steps it already logged. wandb requires non-decreasing
+    steps per run (see log_reconstruction_grid's wandb_step-vs-em_step split below for the same
+    reasoning already applied within this loop). Defaults to 0, preserving today's behavior for
+    every call site that doesn't pass it.
+    """
     N_obs = y_obs.size(0)
     n_acq = int(acq_idx.max().item()) + 1
     fixed_acq_id = 0  # tracked for the whole run so its reconstruction is comparable over time
     steps_first_em = args.steps_first_em if args.steps_first_em is not None else args.steps_per_em
-    global_step = [0]
+    global_step = [global_step_start]
 
     for k in range(args.n_em_steps):
         print("=" * 60)

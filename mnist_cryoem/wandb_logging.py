@@ -33,6 +33,21 @@ def log_train_step(loss_img: torch.Tensor, loss_pose: torch.Tensor,
     }, step=global_step)
 
 
+def log_warmup_step(loss_img: torch.Tensor, loss_pose: torch.Tensor,
+                    grad_norm: torch.Tensor, global_step: int, use_wandb: bool) -> None:
+    """Per-SGD-step scalars from main.py's --warmup_steps phase (warmup.py) -- a copy of
+    log_train_step under warmup/* keys instead of train/*, so the classical-recon warm-start's
+    scalars stay visually distinct from the EM loop's M-step scalars on the same wandb run/step
+    axis (see em.py::run_em_loop's global_step_start parameter)."""
+    if not use_wandb:
+        return
+    wandb.log({
+        "warmup/loss_image": loss_img.item(),
+        "warmup/loss_pose": loss_pose.item(),
+        "warmup/grad_norm": grad_norm.item(),
+    }, step=global_step)
+
+
 def log_overfit_step(loss: torch.Tensor, loss_img: torch.Tensor, loss_pose: torch.Tensor,
                      grad_norm: torch.Tensor, step: int, use_wandb: bool) -> None:
     """Per-step scalars from the --overfit single-batch sanity check (overfit.py)."""

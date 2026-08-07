@@ -7,6 +7,7 @@ from data import load_mnist_subset, build_observations
 from corruption import forward_channel, sample_uniform_angle
 from em import run_em_loop
 from overfit import overfit_single_batch
+from warmup import run_classical_recon_warmup
 from model import ConditionalVelocityCryoEM, IMAGE_SIZE
 
 try:
@@ -49,6 +50,17 @@ def parse_args():
                         help="Degrees between consecutive tilts within one acquisition's "
                              "series (unused when --n_tilts=1)")
     parser.add_argument("--noise_std", type=float, default=3.0)
+    parser.add_argument("--dataset_split", type=str, default="test", choices=["train", "test"],
+                        help="Which MNIST split to draw GT digits from. Default 'test' preserves "
+                             "the disjointness guarantee vs. pretrain.py's hardcoded train split "
+                             "(see mnist_cryoem/CLAUDE.md's dataset-split gotcha) -- change this "
+                             "only when there's no separate pretrain.py pool to stay disjoint "
+                             "from, e.g. an in-process --warmup_steps run with no --init_ckpt, or "
+                             "when the test split's smaller per-class count (892-1135) is itself "
+                             "the limiting factor for --n_images_per_class. CAUTION: combining "
+                             "--dataset_split train with --init_ckpt pointing at a pretrain.py "
+                             "checkpoint (which always trains on the train split) reintroduces "
+                             "exactly the overlap that guarantee exists to prevent.")
 
     # EM Loop
     parser.add_argument("--init_ckpt", type=str, default=None,
@@ -68,6 +80,34 @@ def parse_args():
                              "(default: same as --steps_per_em)")
     parser.add_argument("--sample_steps", type=int, default=50,
                             help="Euler steps for the joint ODE (Phi) in the E-step")
+
+    # Warmup (--warmup_steps > 0): supervised stochastic-interpolant warm-start on classical
+    # (filtered-backprojection) reconstructions of THIS run's own D_Y (y_obs/theta_star built
+    # above), run in-process right before the EM loop -- see warmup.py::run_classical_recon_warmup.
+    # Unlike pretrain.py's separate --warmstart_target classical_recon script, there's no separate
+    # pool geometry here: --corruptions_per_object/--n_tilts/--tilt_increment_deg/--noise_std
+    # above size BOTH this pool and the EM loop's pool, since they're the same D_Y.
+    parser.add_argument("--warmup_steps", type=int, default=0,
+                        help="Supervised SGD steps on a classical-recon reconstruction of this "
+                             "run's own D_Y, run once before the EM loop starts. 0 (default) "
+                             "disables the warmup phase entirely.")
+    parser.add_argument("--warmup_recon_filter_type", type=str, default="hann",
+                        choices=["hann", "ramp"],
+                        help="Only used when --warmup_steps > 0. Passed to "
+                             "classical_recon.backproject's ramp filter.")
+    parser.add_argument("--warmup_recon_calibration", type=str, default="affine_clamp",
+                        choices=["affine_clamp", "none"],
+                        help="Only used when --warmup_steps > 0. 'affine_clamp' (default): "
+                             "rescale the whole reconstruction pool to the GT pool's mean/std "
+                             "(raw backprojection output is not on MNIST's [-1,1] scale), then "
+                             "clamp to [-1,1]. 'none': use raw backproject() output as-is.")
+    parser.add_argument("--warmup_checkpoint_every", type=int, default=100,
+                        help="Only used when --warmup_steps > 0. Save a safety checkpoint "
+                             "(model_warmup.pt) every N warmup steps.")
+    parser.add_argument("--warmup_plot_every", type=int, default=100,
+                        help="Only used when --warmup_steps > 0. Log a qualitative "
+                             "reconstruction panel to wandb every N warmup steps (0 disables "
+                             "it; the final warmup step always logs one).")
 
     # Model
     parser.add_argument("--arch", type=str, default="dit", choices=["dit", "unet"],
@@ -113,6 +153,10 @@ if __name__ == "__main__":
         if not _explicit("--sample_steps"):           args.sample_steps = 5
         if not _explicit("--batch_size"):             args.batch_size = 8
         if not _explicit("--overfit_steps"):          args.overfit_steps = 8
+        # --warmup_steps itself is left alone (stays 0 unless the user opts in) -- --debug
+        # should not silently turn the warmup phase on. These just keep it fast if they did.
+        if not _explicit("--warmup_checkpoint_every"): args.warmup_checkpoint_every = 2
+        if not _explicit("--warmup_plot_every"):       args.warmup_plot_every = 2
 
     steps_first_em = args.steps_first_em if args.steps_first_em is not None else args.steps_per_em
     use_wandb = _WANDB_AVAILABLE and not args.no_wandb
@@ -127,7 +171,7 @@ if __name__ == "__main__":
 
     # ── Load dataset ─────────────────────────────────────────────────────
     x_gt = load_mnist_subset(args.n_images_per_class, digit_classes=args.digit_classes,
-                             train=False)
+                             train=(args.dataset_split == "train"))
     y_obs, theta_star, image_idx, acq_idx = build_observations(
         x_gt, corruptions_per_object=args.corruptions_per_object,
         n_tilts=args.n_tilts, tilt_increment_deg=args.tilt_increment_deg,
@@ -135,7 +179,7 @@ if __name__ == "__main__":
     )
     N_obs = y_obs.size(0)
     print(f"GT digits: {x_gt.size(0)} ({args.n_images_per_class} per class, "
-          f"classes={args.digit_classes or list(range(10))}, split=test)   "
+          f"classes={args.digit_classes or list(range(10))}, split={args.dataset_split})   "
           f"observations: {N_obs} "
           f"({args.corruptions_per_object} acquisitions x {args.n_tilts} tilts per digit)")
     print(f"GT  range=[{x_gt.min():.2f}, {x_gt.max():.2f}]")
@@ -165,7 +209,7 @@ if __name__ == "__main__":
             wandb.init(
                 project="scsi-cryoem-mnist-overfit",
                 config=vars(args) | {"n_params": n_params, "batch_size": n_batch,
-                                     "dataset_split": "test"},
+                                     "dataset_split": args.dataset_split},
             )
 
         final_loss = overfit_single_batch(
@@ -185,16 +229,30 @@ if __name__ == "__main__":
             project="scsi-cryoem-mnist",
             config=vars(args) | {
                 "n_params": n_params, "N_obs": N_obs, "steps_first_em": steps_first_em,
-                "dataset_split": "test",
+                "dataset_split": args.dataset_split,
             },
         )
 
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(exist_ok=True)
 
+    # ── Warmup (--warmup_steps > 0): supervised classical-recon warm-start on this run's own
+    # D_Y, sharing this same wandb run with the EM loop below (see warmup.py's docstring).
+    # Composable with --init_ckpt: loading a checkpoint and then further warming it up on this
+    # run's own data is intentional, not an error.
+    warmup_global_step = 0
+    if args.warmup_steps > 0:
+        print(f"Warmup: {args.warmup_steps} classical-recon-supervised steps on this run's own "
+              f"D_Y ({N_obs} observations, {args.corruptions_per_object} acquisitions/object)")
+        warmup_global_step = run_classical_recon_warmup(
+            model, opt, x_gt, y_obs, theta_star, image_idx, acq_idx,
+            args=args, device=device, use_wandb=use_wandb, ckpt_dir=ckpt_dir,
+        )
+
     run_em_loop(
         model, opt, y_obs, x_gt, theta_star, image_idx, acq_idx,
         args=args, device=device, use_wandb=use_wandb, ckpt_dir=ckpt_dir,
+        global_step_start=warmup_global_step,
     )
 
     if use_wandb:
