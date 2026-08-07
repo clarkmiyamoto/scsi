@@ -5,10 +5,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from data import load_mnist_volumes_3d
+from data import load_mnist_volumes_3d, build_observations_3d
 from model import ConditionalVelocityCryoET3D, VOL_SIZE
 from corruption import forward_channel_3d
 from scsi import loss_func_joint_3d
+from si import matrix_to_gram_schmidt
 from wandb_logging import log_train_step, log_pretrain_reconstruction_3d
 
 try:
@@ -69,6 +70,80 @@ SELECTION_STRATEGIES = {
 }
 
 
+########################################################
+# Classical-recon warm start (--warmstart_target classical_recon). 3D analogue of
+# pretrain.py::build_classical_recon_pool -- see its docstring for the full derivation; only the
+# volume/pose-representation-specific details differ, noted inline below.
+########################################################
+
+def build_classical_recon_pool_3d(
+    x_gt: torch.Tensor,
+    corruptions_per_object: int,
+    n_tilts: int,
+    tilt_increment_deg: float,
+    tilt_axis: tuple[float, float, float],
+    recon_filter_type: str,
+    recon_calibration: str,
+    noise_std: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    3D analogue of pretrain.py::build_classical_recon_pool (see its docstring for the full
+    derivation -- steps 1-4 are identical here, one dimension up). Two representation-specific
+    differences from the 2D version:
+      - data.build_observations_3d returns R_star as (N,3,3) rotation MATRICES, not a scalar
+        angle -- classical_recon_3d.backproject needs those matrices directly (R.transpose(-1,-2)
+        for R^{-1}); si.matrix_to_gram_schmidt(R_star) is applied ONLY at the end, to produce the
+        (N,6) pose_pool loss_func_joint_3d actually expects (mirrors forward_channel_3d's own
+        pose6-at-the-public-boundary convention).
+      - tilt_axis (the FIXED lab-frame tilt axis) has no 2D analogue.
+
+    Returns:
+        x_recon_pool: (n_images*corruptions_per_object*n_tilts, 1, D, H, W)
+        pose_pool:    (n_images*corruptions_per_object*n_tilts, 6) -- TRUE pose per observation,
+            Gram-Schmidt representation (exact -- known because this is synthetic data)
+        y_pool:       (n_images*corruptions_per_object*n_tilts, 1, H, W) -- raw D_Y observations
+        image_idx:    (n_images*corruptions_per_object*n_tilts,) -- which source object each
+            entry came from; only used by the wandb panel's per-object display slice
+    """
+    from classical_recon_3d import backproject  # lazy: see build_classical_recon_pool's note
+
+    vol_size = x_gt.size(-1)
+    y_obs, R_star, image_idx, acq_idx = build_observations_3d(
+        x_gt, corruptions_per_object=corruptions_per_object, n_tilts=n_tilts,
+        tilt_increment_deg=tilt_increment_deg, noise_std=noise_std, tilt_axis=tilt_axis,
+    )
+    n_acq = x_gt.size(0) * corruptions_per_object
+
+    x_recon_chunks = []
+    for a in range(n_acq):
+        mask = acq_idx == a
+        x_hat_a = backproject(y_obs[mask], R_star[mask], vol_size,
+                              filtered=True, filter_type=recon_filter_type)  # (1,1,D,H,W)
+        x_recon_chunks.append(x_hat_a.expand(int(mask.sum()), -1, -1, -1, -1))
+    x_recon_pool = torch.cat(x_recon_chunks, dim=0)
+
+    if recon_calibration == "affine_clamp":
+        a_coef = x_gt.std() / x_recon_pool.std().clamp_min(1e-8)
+        b_coef = x_gt.mean() - a_coef * x_recon_pool.mean()
+        x_recon_pool = (a_coef * x_recon_pool + b_coef).clamp(-1.0, 1.0)
+    elif recon_calibration != "none":
+        raise ValueError(f"Unknown recon_calibration: {recon_calibration!r}")
+
+    pose_pool = matrix_to_gram_schmidt(R_star)
+    return x_recon_pool, pose_pool, y_obs, image_idx
+
+
+def _classical_target_for_display_3d(
+    x_recon_pool: torch.Tensor | None,
+    image_idx: torch.Tensor | None,
+    n_images: int,
+) -> torch.Tensor | None:
+    """3D analogue of pretrain.py::_classical_target_for_display."""
+    if x_recon_pool is None:
+        return None
+    return torch.stack([x_recon_pool[image_idx == i][0] for i in range(n_images)])
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Supervised pretraining of the first SCSI teacher Theta^(0) for the "
@@ -98,6 +173,45 @@ def parse_args():
     parser.add_argument("--noise_std", type=float, default=0.5,
                         help="AWGN std for the 2D-image observation (different scale than the "
                              "2D pipeline's 1D-projection channel — don't reuse that default)")
+
+    # Classical-recon warm start (see build_classical_recon_pool_3d's docstring)
+    parser.add_argument("--warmstart_target", type=str, default="gt",
+                        choices=["gt", "classical_recon"],
+                        help="'gt' (default): x1 = the literal canonical GT volume, matching "
+                             "today's behavior exactly. 'classical_recon': x1 = a classical "
+                             "weighted-backprojection reconstruction of a FINITE pool of the "
+                             "object's own corrupted observations -- see "
+                             "build_classical_recon_pool_3d.")
+    parser.add_argument("--corruptions_per_object", type=int, default=1,
+                        help="Only used when --warmstart_target classical_recon. Number of "
+                             "independent tilt-series ACQUISITIONS per GT object -- each "
+                             "acquisition gets its OWN classical reconstruction. Same flag name "
+                             "as main_3d.py, but a much smaller default (main_3d.py: 50) -- each "
+                             "acquisition costs one backproject() call at pool-build time.")
+    parser.add_argument("--n_tilts", type=int, default=16,
+                        help="Only used when --warmstart_target classical_recon. T: number of "
+                             "tilts (2D projections) per acquisition's tilt series, at angles "
+                             "evenly spaced by --tilt_increment_deg -- also the number of views "
+                             "classical backprojection reconstructs each x_hat from. Same "
+                             "name/default as main_3d.py's --n_tilts.")
+    parser.add_argument("--tilt_increment_deg", type=float, default=7.5,
+                        help="Only used when --warmstart_target classical_recon. Same "
+                             "name/default as main_3d.py's --tilt_increment_deg.")
+    parser.add_argument("--tilt_axis", type=float, nargs=3, default=(0.0, 1.0, 0.0),
+                        help="Only used when --warmstart_target classical_recon. Same "
+                             "name/default as main_3d.py's --tilt_axis.")
+    parser.add_argument("--recon_filter_type", type=str, default="hann", choices=["hann", "ramp"],
+                        help="Only used when --warmstart_target classical_recon. Passed to "
+                             "classical_recon_3d.backproject's ramp filter.")
+    parser.add_argument("--recon_calibration", type=str, default="affine_clamp",
+                        choices=["affine_clamp", "none"],
+                        help="Only used when --warmstart_target classical_recon. "
+                             "'affine_clamp' (default): rescale the whole reconstruction pool "
+                             "to the GT pool's mean/std (raw backprojection output is not on "
+                             "[-1,1] scale -- see build_classical_recon_pool_3d's docstring), "
+                             "then clamp to [-1,1]. 'none': use raw backproject() output as-is "
+                             "-- an escape hatch for debugging, expected to train poorly.")
+
     parser.add_argument("--n_steps", type=int, default=5000,
                         help="Flat supervised SGD steps (no outer/inner loop)")
     parser.add_argument("--interpolant_style", type=str, default="linear",
@@ -135,6 +249,7 @@ if __name__ == "__main__":
         if not _explicit("--checkpoint_every"):            args.checkpoint_every = 4
         if not _explicit("--plot_every"):                  args.plot_every = 4
         if not _explicit("--sample_steps"):                args.sample_steps = 5
+        if not _explicit("--n_tilts"):                     args.n_tilts = 4
 
     use_wandb = _WANDB_AVAILABLE and not args.no_wandb
     print(f"Device: {device}")
@@ -148,6 +263,25 @@ if __name__ == "__main__":
           f"classes={args.digit_classes or list(range(10))}, "
           f"strategy={args.selection_strategy}, vol_size={args.vol_size}, split=train)")
 
+    # ── Classical-recon warm start (--warmstart_target classical_recon) ───
+    x_recon_pool = pose_pool = y_pool = recon_image_idx = None
+    if args.warmstart_target == "classical_recon":
+        x_recon_pool, pose_pool, y_pool, recon_image_idx = build_classical_recon_pool_3d(
+            volume_pool, corruptions_per_object=args.corruptions_per_object,
+            n_tilts=args.n_tilts, tilt_increment_deg=args.tilt_increment_deg,
+            tilt_axis=tuple(args.tilt_axis), recon_filter_type=args.recon_filter_type,
+            recon_calibration=args.recon_calibration, noise_std=args.noise_std,
+        )
+        x_recon_pool, pose_pool, y_pool, recon_image_idx = (
+            x_recon_pool.to(device), pose_pool.to(device), y_pool.to(device),
+            recon_image_idx.to(device))
+        print(f"Classical-recon pool: {x_recon_pool.size(0)} (x_hat, y) pairs "
+              f"({volume_pool.size(0)} objects x {args.corruptions_per_object} acquisitions x "
+              f"{args.n_tilts} tilts, filter={args.recon_filter_type}, "
+              f"calibration={args.recon_calibration})  "
+              f"x_hat stats: min={x_recon_pool.min():.3f} max={x_recon_pool.max():.3f} "
+              f"mean={x_recon_pool.mean():.4f} std={x_recon_pool.std():.4f}")
+
     # ── Model / optimizer ────────────────────────────────────────────────
     model = ConditionalVelocityCryoET3D(vol_size=args.vol_size).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -155,9 +289,11 @@ if __name__ == "__main__":
     print(f"Parameters: {n_params:,}\n")
 
     if use_wandb:
+        pool_size = (x_recon_pool.size(0) if args.warmstart_target == "classical_recon"
+                    else volume_pool.size(0))
         wandb.init(
             project="scsi-cryoet-mnist3d-pretrain",
-            config=vars(args) | {"n_params": n_params, "pool_size": volume_pool.size(0),
+            config=vars(args) | {"n_params": n_params, "pool_size": pool_size,
                                  "dataset_split": "train"},
         )
 
@@ -165,14 +301,19 @@ if __name__ == "__main__":
     out_ckpt.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Flat supervised stochastic-interpolant training ─────────────────
-    N = volume_pool.size(0)
+    N = x_recon_pool.size(0) if args.warmstart_target == "classical_recon" else volume_pool.size(0)
     model.train()
     running_img, running_pose = 0.0, 0.0
 
     for step in tqdm(range(args.n_steps), desc="pretrain"):
         idx = torch.randint(0, N, (args.batch_size,))
-        x_batch = volume_pool[idx]                       # canonical GT, untouched
-        y_batch, pose_batch = forward_channel_3d(x_batch, noise_std=args.noise_std)
+        if args.warmstart_target == "classical_recon":
+            x_batch = x_recon_pool[idx]                   # classical WBP reconstruction, calibrated
+            pose_batch = pose_pool[idx]                    # TRUE pose for that observation
+            y_batch = y_pool[idx]                          # the REAL observation -- not resynthesized
+        else:
+            x_batch = volume_pool[idx]                     # canonical GT, untouched
+            y_batch, pose_batch = forward_channel_3d(x_batch, noise_std=args.noise_std)
 
         loss, loss_img, loss_pose = loss_func_joint_3d(
             model, x_batch, pose_batch, y_batch,
@@ -194,12 +335,16 @@ if __name__ == "__main__":
             log_pretrain_reconstruction_3d(
                 model, volume_pool, noise_std=args.noise_std,
                 sample_steps=args.sample_steps, step=step, use_wandb=use_wandb,
+                classical_target=_classical_target_for_display_3d(
+                    x_recon_pool, recon_image_idx, volume_pool.size(0)),
             )
 
     if args.plot_every > 0 and args.n_steps % args.plot_every != 0:
         log_pretrain_reconstruction_3d(
             model, volume_pool, noise_std=args.noise_std,
             sample_steps=args.sample_steps, step=args.n_steps - 1, use_wandb=use_wandb,
+            classical_target=_classical_target_for_display_3d(
+                x_recon_pool, recon_image_idx, volume_pool.size(0)),
         )
 
     torch.save(model.state_dict(), out_ckpt)

@@ -11,10 +11,12 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=cm6627@nyu.edu
 
-# Baseline matrix, Group B (novel-class generalization): pretrained narrower than the EM
-# problem -- does SCSI/EM discover a class it never saw during pretraining?
-# few_hi_novel: pretrained on {0,3,8}, EM problem sees {0,3,8,5} (5 is novel).
-# Compare against few_hi_matched (same pretrain, no novel class).
+# Baseline matrix, Group B (novel-class generalization), partial-overlap case: pretrained
+# narrower than the EM problem -- does SCSI/EM discover a class it never saw during
+# pretraining, while still recognizing the classes it did?
+# few_hi_novel: pretrained on {0,3,8}, EM problem sees {0,3,8,5} (5 is novel, 0/3/8 overlap).
+# Compare against: few_hi_matched (same pretrain, no novel class), em_few_hi_disjoint (harsher
+# version -- ZERO class overlap with pretraining, not just one added class).
 
 cd /scratch/cm6627/scsi/mnist_cryoem
 

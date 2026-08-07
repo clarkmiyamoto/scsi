@@ -12,8 +12,12 @@
 #SBATCH --mail-user=cm6627@nyu.edu
 
 # Baseline matrix, Group A (matched): pretrain coverage == EM problem coverage.
-# all_lo_matched: pretrained on all 10 classes (32 img/class, starved), EM problem also all 10.
-# Compare against: all_hi_matched (same coverage, well-fed pretrain).
+# all_lo_matched: pretrained on all 10 classes (32 img/class, starved, classical_recon warm
+# start), EM problem also all 10. This is the low end of the "how much pretraining data do we
+# need" question -- compare against em_none_matched (no pretraining at all) to see whether 32
+# img/class is already buying anything over a cold start.
+# Compare against: all_hi_matched (same coverage, well-fed pretrain), em_none_matched
+# (cold-start floor).
 # NOTE: --digit_classes omitted -> defaults to all 10 classes.
 
 cd /scratch/cm6627/scsi/mnist_cryoem

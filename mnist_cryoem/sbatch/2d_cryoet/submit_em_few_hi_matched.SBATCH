@@ -12,8 +12,10 @@
 #SBATCH --mail-user=cm6627@nyu.edu
 
 # Baseline matrix, Group A (matched): pretrain coverage == EM problem coverage.
-# few_hi_matched: pretrained on {0,3,8} (516 img/class), EM problem also {0,3,8}.
-# Compare against: single_hi_matched (1 class), all_hi_matched (10 classes).
+# few_hi_matched: pretrained on {0,3,8} (516 img/class, classical_recon warm start,
+# corruptions_per_object=4), EM problem also {0,3,8}.
+# Compare against: single_hi_matched (1 class), all_hi_matched (10 classes),
+# em_few_hi_cpo1_matched (same cell, corruptions_per_object=1 pretrain).
 
 cd /scratch/cm6627/scsi/mnist_cryoem
 

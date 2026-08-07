@@ -12,9 +12,12 @@
 #SBATCH --mail-user=cm6627@nyu.edu
 
 # Baseline matrix, Group A (matched): pretrain coverage == EM problem coverage.
-# all_hi_matched: pretrained on all 10 classes (516 img/class), EM problem also all 10.
-# This is the ceiling run of the whole matrix. Also the steps_per_em=200 (default) point for
-# Group D's sweep -- compare against em_all_hi_steps{1,10,50}.
+# all_hi_matched: pretrained on all 10 classes (516 img/class, classical_recon warm start),
+# EM problem also all 10. This is the ceiling run of the CLASSICAL-RECON matrix specifically
+# -- for the true, GT-oracle ceiling of the whole matrix see em_all_hi_gt_matched. Also the
+# steps_per_em=200 (default) point for Group D's sweep -- compare against
+# em_all_hi_steps{1,10,50}.
+# Compare against: em_all_hi_gt_matched (GT-oracle ceiling), em_none_matched (cold-start floor).
 # NOTE: --digit_classes omitted -> defaults to all 10 classes.
 
 cd /scratch/cm6627/scsi/mnist_cryoem

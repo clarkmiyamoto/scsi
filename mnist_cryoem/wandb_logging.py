@@ -55,6 +55,7 @@ def log_pretrain_reconstruction(
     step: int,
     use_wandb: bool,
     n: int = 6,
+    classical_target: torch.Tensor | None = None,  # (n_images, 1, H, W), index-aligned with x_gt
 ) -> None:
     """
     Periodic qualitative check for pretrain.py (which otherwise only logs scalars via
@@ -65,11 +66,20 @@ def log_pretrain_reconstruction(
     theta)| — here a real accuracy metric (pretrain.py has true GT rotations), unlike
     log_em_pool_diagnostics's pool-vs-pool circular error which is diagnostic-only.
 
+    classical_target (pretrain.py's --warmstart_target classical_recon only): when given, an
+    extra "Classical x_hat (target)" row is inserted right after "GT digit", showing what the
+    model was ACTUALLY trained to reproduce (a classical reconstruction, not the true digit) —
+    without this row, comparing the model's output only to GT would make a correctly-trained
+    model look like it's failing, since it was never trained to match GT exactly. None (default)
+    preserves the original 4-row panel unchanged, for the --warmstart_target gt path.
+
     sample_joint leaves the model in eval() mode (it doesn't restore it) — this function
     restores model.train() before returning so the caller's training loop is unaffected.
     """
     n = min(n, x_gt.size(0))
     x_gt = x_gt[:n]
+    if classical_target is not None:
+        classical_target = classical_target[:n]
     device = x_gt.device
 
     theta_true = sample_uniform_angle(n, device)
@@ -98,11 +108,15 @@ def log_pretrain_reconstruction(
     # signals differ.
     rows = [
         (x_gt[:, 0].cpu(), "GT digit", "img"),
+    ]
+    if classical_target is not None:
+        rows.append((classical_target[:, 0].cpu(), "Classical x_hat (target)", "img"))
+    rows += [
         (obs_strip, "Obs y", "1d"),
         (x_hat[:, 0].cpu(), "Model x_hat", "img"),
         (proj_strip, "F(x_hat)", "1d"),
     ]
-    fig, axes = plt.subplots(4, n, figsize=(2 * n, 8), squeeze=False)
+    fig, axes = plt.subplots(len(rows), n, figsize=(2 * n, 2 * len(rows)), squeeze=False)
     for r, (_, label, _) in enumerate(rows):
         axes[r, 0].set_ylabel(label, fontsize=9)
     for j in range(n):
@@ -608,6 +622,7 @@ def log_pretrain_reconstruction_3d(
     step: int,
     use_wandb: bool,
     n: int = 6,
+    classical_target: torch.Tensor | None = None,  # (n_images, 1, D, H, W), aligned with x_gt
 ) -> None:
     """
     3D analogue of log_pretrain_reconstruction. Draws a fresh random rotation for n GT volumes,
@@ -625,11 +640,18 @@ def log_pretrain_reconstruction_3d(
     comparison, and GT never changes call to call, so re-uploading it every --plot_every would
     be pure upload-budget waste — see _volume_to_pointcloud's docstring on cost).
 
+    classical_target (pretrain_3d.py's --warmstart_target classical_recon only): same purpose as
+    log_pretrain_reconstruction's — when given, an extra "Classical x_hat xy|xz|yz (target)" row
+    (its own _projection_mosaic) is inserted right after "GT xy|xz|yz". None (default) preserves
+    the original 4-row panel.
+
     sample_joint_3d leaves the model in eval() mode (it doesn't restore it) — this function
     restores model.train() before returning so the caller's training loop is unaffected.
     """
     n = min(n, x_gt.size(0))
     x_gt = x_gt[:n]
+    if classical_target is not None:
+        classical_target = classical_target[:n]
     device = x_gt.device
 
     R_true = sample_uniform_rotation_so3(n, device)
@@ -648,15 +670,19 @@ def log_pretrain_reconstruction_3d(
     gen_mosaic = _projection_mosaic(x_hat).cpu()     # (n, H, 3W)
     proj = proj_hat[:, 0].cpu()                       # (n, H, W)
 
-    # All four rows are sum-projections (unlike the 2D version's split between raw [-1,1]
-    # image rows and 1D-signal rows) — one dynamic range per column, shared across all 4 rows.
+    # All rows are sum-projections (unlike the 2D version's split between raw [-1,1] image rows
+    # and 1D-signal rows) — one dynamic range per column, shared across all rows.
     rows = [
         (gt_mosaic, "GT xy|xz|yz"),
+    ]
+    if classical_target is not None:
+        rows.append((_projection_mosaic(classical_target).cpu(), "Classical x_hat xy|xz|yz (target)"))
+    rows += [
         (obs, "Obs y"),
         (gen_mosaic, "Model x_hat xy|xz|yz"),
         (proj, "F(x_hat)"),
     ]
-    fig, axes = plt.subplots(4, n, figsize=(2.4 * n, 8), squeeze=False)
+    fig, axes = plt.subplots(len(rows), n, figsize=(2.4 * n, 2 * len(rows)), squeeze=False)
     for r, (_, label) in enumerate(rows):
         axes[r, 0].set_ylabel(label, fontsize=9)
     for j in range(n):
