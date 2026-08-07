@@ -113,6 +113,13 @@ def parse_args():
     parser.add_argument("--arch", type=str, default="dit", choices=["dit", "unet"],
                         help="Image branch architecture: DiTTransformer2DModel or "
                              "UNet2DModel (both from diffusers)")
+    parser.add_argument("--patch_size", type=int, default=4, choices=[2, 4, 8, 16],
+                        help="DiT-only: side length of each patch embedding "
+                             "(DiTTransformer2DModel's patch_size). Ignored under --arch unet. "
+                             "IMAGE_SIZE=32 must be divisible by this. A checkpoint loaded via "
+                             "--init_ckpt must have been trained with the SAME --patch_size "
+                             "(and --arch) -- a mismatch fails loudly on load_state_dict's "
+                             "strict=True, same convention as --no_pose_head in the MRA channel.")
 
     # Stochastic Interpolant / Training
     parser.add_argument("--interpolant_style", type=str, default="linear",
@@ -189,7 +196,9 @@ if __name__ == "__main__":
     # The optimizer is created once and persists across every EM outer iteration (see
     # scsi.py::train_mstep docstring) — required for --steps_per_em as low as 1 to be a fair
     # test of the literal pseudocode rather than being crippled by constantly-reset Adam state.
-    model = ConditionalVelocityCryoEM(image_size=IMAGE_SIZE, arch=args.arch).to(device)
+    model = ConditionalVelocityCryoEM(
+        image_size=IMAGE_SIZE, arch=args.arch, patch_size=args.patch_size,
+    ).to(device)
     if args.init_ckpt is not None:
         model.load_state_dict(torch.load(args.init_ckpt, map_location=device))
         print(f"Loaded initial teacher weights <- {args.init_ckpt}")

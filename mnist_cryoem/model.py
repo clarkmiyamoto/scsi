@@ -124,11 +124,11 @@ class ConditionalVelocityCryoEM(nn.Module):
     y-broadcast and the t-fraction -> t_int conversion so si.py stays agnostic to how the two
     branches consume time/conditioning.
     """
-    def __init__(self, image_size=IMAGE_SIZE, arch: str = "dit"):
+    def __init__(self, image_size=IMAGE_SIZE, arch: str = "dit", patch_size: int = 4):
         super().__init__()
         self.image_size = image_size
         if arch == "dit":
-            self.image_branch = ConditionalDiT(image_size=image_size)
+            self.image_branch = ConditionalDiT(image_size=image_size, patch_size=patch_size)
         elif arch == "unet":
             self.image_branch = ConditionalUNet2D(image_size=image_size)
         else:
