@@ -1,8 +1,6 @@
 import torch
 
-########################################################
-# Image-branch interpolant (linear / gvp)
-########################################################
+### Styles of Interpolants
 
 def alpha_linear(t):     return 1.0 - t
 def beta_linear(t):      return t
@@ -14,6 +12,7 @@ def beta_gvp(t):      return torch.sin(t * torch.pi / 2.0)
 def alpha_dot_gvp(t): return -torch.pi / 2.0 * torch.sin(t * torch.pi / 2.0)
 def beta_dot_gvp(t):  return  torch.pi / 2.0 * torch.cos(t * torch.pi / 2.0)
 
+### Stochastic Interpolants code
 
 def interpolant(x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor,
                 style: str = "linear") -> tuple[torch.Tensor, torch.Tensor]:

@@ -35,8 +35,7 @@ def euler_integration_trajectory(
 ) -> torch.Tensor:
     """
     Same as euler_integration, but also returns n_snapshots evenly-spaced intermediate states
-    (including t=0 and t=1) for visualization. Only meant for small viz batches, not the 10k
-    E-step pool -- euler_integration itself is untouched to keep that path memory-flat.
+    (including t=0 and t=1) for visualization.
     """
     model.eval()
 
