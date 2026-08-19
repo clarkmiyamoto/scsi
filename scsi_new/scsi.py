@@ -5,7 +5,7 @@ import wandb
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import Dataset, DataLoader, TensorDataset
-from si import loss_ConditionalDrift
+from si import loss_ConditionalDrift, load_interpolant
 from ode import euler_integration
 from distribution import Distribution
 from dataclasses import dataclass, field
@@ -125,9 +125,13 @@ def mstep_lifted(model,
     model.train()
     device = next(model.parameters()).device
 
+    # Data
     batch_size = config.batch_size
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     dataloader_iter = iter(dataloader)
+
+    # Interpolant
+    interpolant = load_interpolant(config.interpolant_style)
 
     for _ in range(config.n_steps_train):
         try:
@@ -140,7 +144,7 @@ def mstep_lifted(model,
         optimizer.zero_grad()
         ts = torch.rand(x_hat.size(0), 1, 1, 1, device=device)  # Random time for each sample
         x0s = base_dist.sample(x_hat.size(0))
-        loss = loss_ConditionalDrift(model, x0=x0s, x1=x_hat, t=ts, y=y_hat, style=config.interpolant_style)
+        loss = loss_ConditionalDrift(model, x0=x0s, x1=x_hat, t=ts, y=y_hat, interpolant=interpolant)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
         optimizer.step()

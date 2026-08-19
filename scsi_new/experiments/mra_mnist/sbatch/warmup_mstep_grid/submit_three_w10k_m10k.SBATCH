@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=mra_three_w10k_m10k
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --gres=gpu:1
+#SBATCH --time=12:00:00
+#SBATCH --output=/scratch/cm6627/scsi/scsi_new/experiments/mra_mnist/slurm-%j.out
+#SBATCH --error=/scratch/cm6627/scsi/scsi_new/experiments/mra_mnist/slurm-%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=cm6627@nyu.edu
+
+# Warmup x M-step "amount of training" grid, digit class 3 only (6,000 images/class).
+# This cell: warmup_n_steps_train=10000, mstep_n_steps_train=10000, num_scsi_steps=40 (fixed).
+# Full grid + caveats: ../warmup_mstep_grid/README.md
+#
+# --time=12:00:00 is a flat budget across the whole grid (set at the user's explicit request,
+# not measured) -- throughput extrapolated from a sibling codebase's comparable run suggests
+# several cells in this grid, especially the higher mstep_n_steps_train ones, likely will NOT
+# finish all 40 EM steps inside 12h. main.py has no checkpointing, so a walltime kill loses the
+# run's weights entirely; whatever reconstruction/trajectory panels had already been logged to
+# wandb (every EM step) are what survive.
+
+cd /scratch/cm6627/scsi/scsi_new/experiments/mra_mnist
+
+uv run main.py \
+    --digit_classes 3 \
+    --n_images_per_class 6000 \
+    --warmup_n_steps_train 10000 \
+    --mstep_n_steps_train 10000 \
+    --num_scsi_steps 40 \
+    --wandb_project scsi-mra-mnist-three-warmup-mstep-grid \
+    --wandb_run_name w10k_m10k
