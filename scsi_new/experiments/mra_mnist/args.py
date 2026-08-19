@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
 
     # --- Corruption channel ---
     channel = parser.add_argument_group("corruption channel")
-    channel.add_argument("--noise_std", type=float, default=3.0)
+    channel.add_argument("--noise_std", type=float, default=1.5)
 
     # --- Model ---
     model_grp = parser.add_argument_group("model")
