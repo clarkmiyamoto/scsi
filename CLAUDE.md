@@ -1,6 +1,6 @@
 # scsi — navigation guide for Claude
 
-Research codebase for **Self-Consistent Stochastic Interpolants (SCSI)**: recovering a prior over clean signals from corrupted observations via an EM loop where the E-step trains a stochastic-interpolant velocity field and the M-step updates the prior. Four parallel experiment scopes scale up complexity (toy 2D → toy 3D → MNIST → ModelNet cryoEM); they all share the same module skeleton, so learn one and you know them all.
+Research codebase for **Self-Consistent Stochastic Interpolants (SCSI)**: recovering a prior over clean signals from corrupted observations via an EM loop that alternates (1) proposing clean-data samples by flowing noise through the current velocity field's ODE, conditioned on an observation, and (2) training that velocity field via a stochastic-interpolant loss on the proposed samples. Four parallel experiment scopes scale up complexity (toy 2D → toy 3D → MNIST → ModelNet cryoEM); they all share the same module skeleton, so learn one and you know them all. **Note:** directories disagree on which of (1)/(2) is called "E-step" vs "M-step" — see Gotchas.
 
 ## Environment
 
@@ -18,6 +18,7 @@ Research codebase for **Self-Consistent Stochastic Interpolants (SCSI)**: recove
 | `toy_2d/` | Two-moons exploration. Two notebooks + one reverse-dream script. |
 | `toy_3d/` | Synthetic primitives (sphere / cube / cylinder / ellipsoid / torus) under cryoEM corruption. |
 | `toy_2d_pc/` | 2D point-cloud SCSI: MNIST-digit silhouettes under a CryoEM-style 2D-image→1D-sinogram channel (gaussian/disk/histogram rendering + SO(2) tilt series). Self-contained package, see `toy_2d_pc/CLAUDE.md`. |
+| `mnist_cryoem/` | MNIST under a CryoEM-style 2D-image→1D-sinogram channel (in-plane SO(2) rotation + 1D projection + AWGN), joint image+pose DiT. Also contains a 3D/CryoET generalization in the same files (extruded-MNIST volumes under SO(3) rotation → 2D projection → AWGN with a mount+fixed-axis tilt series, `_3d`/`_so3`-suffixed symbols, 3D UNet + pose-search head, entry points `pretrain_3d.py`/`main_3d.py`). File layout deliberately diverges from the shared 6-file skeleton to mirror the EM pseudocode 1:1 (`scsi.py` = E/M steps, `ode.py` = integrator, `si.py` = interpolants only, `em.py` = outer loop). Self-contained package, see `mnist_cryoem/CLAUDE.md`. |
 | `data/` | Auto-downloaded datasets (currently just MNIST). |
 | `writing/` | Reserved for papers — currently empty. |
 | `main.py` | Top-level stub (`print("Hello from scsi!")`). Ignore. |
@@ -78,6 +79,7 @@ All entry points take CLI flags via argparse (corruption type, dataset size, EM 
 ## Gotchas
 
 - **The four experiment dirs duplicate near-identical code with small divergences.** Fixing a bug in `image_2d/si.py` probably means fixing `simple_3d/si.py` and `toy_3d/`'s inlined version too. Always grep across all four before assuming a change is local.
+- **E-step/M-step labels are inconsistent across directories — don't assume the label carries the same meaning everywhere.** In `image_2d/`, `simple_3d/`, and `toy_3d/`, the function that trains the network via SGD is named/commented `train_estep` ("E-step"), and the function that proposes clean data by flowing noise through the ODE is `update_prior` ("M-step") — i.e. training = "E", data-proposal = "M". `mnist_cryoem/scsi.py` was deliberately corrected to the textbook EM convention instead: `propose_estep()` proposes data ("E-step" = estimate the latents), `train_mstep()` trains the network ("M-step" = maximize over parameters). The underlying algorithm is identical either way (propose-then-train, same order); only the E/M name attached to each phase differs by directory. `mnist_cryoem/` is the reference example of the textbook naming — see `mnist_cryoem/CLAUDE.md` for its pseudocode-aligned file layout.
 - `image_2d/archive/` and `image_2d/results/` exist — confirm whether a file is the live entry point or a snapshot before editing.
 - `toy_2d/*.ipynb` carry large embedded cell outputs (1.5–5.6 MB). Avoid re-executing for trivial reasons; the diff bloat is real.
 - `README.md` is a one-liner — this file is the actual docs. Update it when the module layout changes.

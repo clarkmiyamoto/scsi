@@ -2,6 +2,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 from experiments import run_fixed_y, run_marginal
+from helpers import axis_aligned_rank_reduce
 
 
 # ============================================================
@@ -11,16 +12,33 @@ from experiments import run_fixed_y, run_marginal
 rng = np.random.default_rng(0)
 
 d = 2
+
+# Rank of the prior covariance. RANK == d (default) is the full-rank instance.
+# Set RANK < d for a singular / rank-deficient prior: axis_aligned_rank_reduce
+# keeps the top-left RANK x RANK block and zeros the trailing coordinate axes,
+# so those coords become exact point masses (RANK = 1 in 2D -> Sigma =
+# diag(2, 0): x1 spreads, x2 is a delta at mu). em_exact_drift.py imports the
+# full base Sigma_full, so its own --rank is independent of this value.
+RANK = 2
+
 mu = np.array([1.0, -0.5])
 
-Sigma = np.array([
+Sigma_full = np.array([
     [2.0, 0.8],
     [0.8, 0.7],
 ])
+Sigma = axis_aligned_rank_reduce(Sigma_full, RANK)
 
 s = 0.7
 s2 = s**2
 I = np.eye(d)
+
+# The exact drift diverges as t -> 1 in a singular covariance's null direction
+# (it must collapse that variance to exactly 0), where S_t = s^2 M becomes
+# singular. Integrating to t = 1 - T_END_EPS keeps S_t invertible and the
+# drift finite; the residual null-direction std is ~T_END_EPS (visually
+# collapsed). For a full-rank Sigma the truncation is negligible.
+T_END_EPS = 1e-3
 
 # AWGN posterior matrix:
 # M = Sigma (Sigma + s^2 I)^{-1}
@@ -106,8 +124,9 @@ def solve_particles(Z0, Y, t_eval=None):
     """
     N = Z0.shape[0]
 
+    t_end = 1.0 - T_END_EPS
     if t_eval is None:
-        t_eval = np.linspace(0, 1, 101)
+        t_eval = np.linspace(0, t_end, 101)
 
     if Y.ndim == 1:
         Y_used = np.broadcast_to(Y, Z0.shape)
@@ -121,7 +140,7 @@ def solve_particles(Z0, Y, t_eval=None):
 
     sol = solve_ivp(
         rhs,
-        t_span=(0.0, 1.0),
+        t_span=(0.0, t_end),
         y0=Z0.reshape(-1),
         t_eval=t_eval,
         rtol=1e-8,
@@ -140,5 +159,9 @@ def solve_particles(Z0, Y, t_eval=None):
 # ============================================================
 
 if __name__ == "__main__":
-    run_fixed_y(rng, d, mu, Sigma, s2, M, solve_particles)
-    run_marginal(rng, d, mu, Sigma, s2, I, solve_particles)
+    # When the prior is rank-deficient, plot an active coord (< RANK) against a
+    # null coord (>= RANK) so the 2D snapshot shows one non-singular and one
+    # singular axis.
+    dims = (0, 1) if RANK == d else (0, RANK)
+    run_fixed_y(rng, d, mu, Sigma, s2, M, solve_particles, dims=dims)
+    run_marginal(rng, d, mu, Sigma, s2, I, solve_particles, dims=dims)

@@ -41,8 +41,9 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from exact_drift import mu as MU_NP, Sigma as SIGMA_NP, s2 as S2_NP
+from exact_drift import mu as MU_NP, Sigma_full as SIGMA_NP, s2 as S2_NP
 from experiments import run_fixed_y, run_marginal
+from helpers import axis_aligned_rank_reduce
 
 
 DEFAULT_DEVICE = (
@@ -55,6 +56,7 @@ DEFAULT_DEVICE = (
 @dataclass
 class Config:
     d: int = 2
+    rank: int = 2
     noise_std: float = 0.7
     plot_dims: tuple = (0, 1)
     init_prior_std: float = 0.8
@@ -77,8 +79,9 @@ class Config:
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
     p.add_argument("--d", type=int, default=2, help="Problem dimension. d=2 reuses the fixed instance from exact_drift.py; any other d draws a random SPD Sigma from --seed.")
+    p.add_argument("--rank", type=int, default=None, help="Rank of the prior covariance Sigma (axis-aligned: the last d-rank coordinate axes become exact point masses). Default: full rank d.")
     p.add_argument("--noise-std", type=float, default=0.7, help="AWGN std s (only used when --d != 2; the d=2 instance uses exact_drift.py's fixed s)")
-    p.add_argument("--plot-dims", type=int, nargs=2, default=[0, 1], metavar=("I", "J"), help="Which 2 coordinates (0-indexed) to use for the 2D scatter/contour plots. Diagnostics still cover all d dims.")
+    p.add_argument("--plot-dims", type=int, nargs=2, default=None, metavar=("I", "J"), help="Which 2 coordinates (0-indexed) to use for the 2D scatter/contour plots. Diagnostics still cover all d dims. Default: (0, 1), or (0, rank) when rank < d so one plotted axis is singular and one is not.")
     p.add_argument("--init-prior-std", type=float, default=0.8)
     p.add_argument("--n-em", type=int, default=4)
     p.add_argument("--n-train", type=int, default=300)
@@ -100,13 +103,25 @@ def parse_args() -> Config:
 
     if a.d < 2:
         raise ValueError(f"--d must be >= 2, got {a.d}")
-    if max(a.plot_dims) >= a.d or min(a.plot_dims) < 0:
-        raise ValueError(f"--plot-dims {a.plot_dims} out of range for d={a.d}")
+
+    rank = a.d if a.rank is None else a.rank
+    if not (1 <= rank <= a.d):
+        raise ValueError(f"--rank must be in [1, {a.d}], got {rank}")
+
+    if a.plot_dims is None:
+        # Default: pair an active coord with the first null coord when the
+        # prior is rank-deficient, so one plotted axis is singular and one is not.
+        plot_dims = (0, 1) if rank == a.d else (0, rank)
+    else:
+        plot_dims = tuple(a.plot_dims)
+    if max(plot_dims) >= a.d or min(plot_dims) < 0:
+        raise ValueError(f"--plot-dims {plot_dims} out of range for d={a.d}")
 
     return Config(
         d=a.d,
+        rank=rank,
         noise_std=a.noise_std,
-        plot_dims=tuple(a.plot_dims),
+        plot_dims=plot_dims,
         init_prior_std=a.init_prior_std,
         n_em=a.n_em,
         n_train=a.n_train,
@@ -125,23 +140,31 @@ def parse_args() -> Config:
     )
 
 
-def make_gaussian_awgn_problem(d, seed, noise_std):
+def make_gaussian_awgn_problem(d, seed, noise_std, rank):
     """
     X ~ N(mu, Sigma), Y = X + N(0, s^2 I_d).
 
-    d == 2 reuses the fixed instance from exact_drift.py so default runs stay
-    directly comparable to exact_drift.py's own plots. For any other d, mu
-    and a random SPD Sigma with nontrivial off-diagonal correlation are drawn
-    from `seed` (so runs are reproducible), and s2 = noise_std**2.
+    d == 2 reuses the fixed instance from exact_drift.py (its full-rank base
+    Sigma_full) so default runs stay directly comparable to exact_drift.py's
+    own plots. For any other d, mu and a random SPD Sigma with nontrivial
+    off-diagonal correlation are drawn from `seed` (so runs are reproducible),
+    and s2 = noise_std**2.
+
+    The full-rank base Sigma is then reduced to `rank` via
+    axis_aligned_rank_reduce: rank == d leaves it unchanged; rank < d turns the
+    last d-rank coordinate axes into exact point masses (a singular prior).
     """
     if d == 2:
-        return MU_NP.copy(), SIGMA_NP.copy(), float(S2_NP)
+        mu, Sigma_full, s2 = MU_NP.copy(), SIGMA_NP.copy(), float(S2_NP)
+    else:
+        rng = np.random.default_rng(seed)
+        mu = rng.normal(scale=1.0, size=d)
+        A = rng.normal(size=(d, d))
+        Sigma_full = A @ A.T / d + 0.5 * np.eye(d)
+        s2 = float(noise_std ** 2)
 
-    rng = np.random.default_rng(seed)
-    mu = rng.normal(scale=1.0, size=d)
-    A = rng.normal(size=(d, d))
-    Sigma = A @ A.T / d + 0.5 * np.eye(d)
-    return mu, Sigma, float(noise_std ** 2)
+    Sigma = axis_aligned_rank_reduce(Sigma_full, rank)
+    return mu, Sigma, s2
 
 
 def make_C_matrices_fn(Sigma, s2, d):
@@ -471,14 +494,14 @@ def main():
 
     torch.manual_seed(cfg.seed)
 
-    mu_np, Sigma_np, s2 = make_gaussian_awgn_problem(cfg.d, cfg.seed, cfg.noise_std)
+    mu_np, Sigma_np, s2 = make_gaussian_awgn_problem(cfg.d, cfg.seed, cfg.noise_std, cfg.rank)
     C_matrices_fn, M_np, I_np = make_C_matrices_fn(Sigma_np, s2, cfg.d)
 
     mu_t = torch.tensor(mu_np, dtype=torch.float32, device=cfg.device)
     Sigma_t = torch.tensor(Sigma_np, dtype=torch.float32, device=cfg.device)
 
     print(f"device: {cfg.device}")
-    print(f"d = {cfg.d}, plot_dims = {cfg.plot_dims}")
+    print(f"d = {cfg.d}, rank = {cfg.rank}, plot_dims = {cfg.plot_dims}")
     print(f"target prior: N(mu={mu_np}, Sigma=\n{Sigma_np})")
     print(f"noise variance s^2 = {s2:.4f}")
     print(f"initial (wrong, isotropic) analytic prior variance: {cfg.init_prior_std**2:.4f}")
@@ -538,7 +561,7 @@ def main():
     rng = np.random.default_rng(cfg.seed)
     solve_particles_em = make_numpy_solve_particles(current_model, cfg.device, cfg.ode_steps_eval)
 
-    plot_out_prefix = f"{cfg.out_prefix}_d{cfg.d}_"
+    plot_out_prefix = f"{cfg.out_prefix}_d{cfg.d}_r{cfg.rank}_"
     run_fixed_y(rng, cfg.d, mu_np, Sigma_np, s2, M_np, solve_particles_em,
                 dims=cfg.plot_dims, out_prefix=plot_out_prefix)
     run_marginal(rng, cfg.d, mu_np, Sigma_np, s2, I_np, solve_particles_em,
@@ -548,8 +571,8 @@ def main():
     # EM-specific diagnostics: training loss and coefficient convergence
     # ============================================================
 
-    coeff_evo_path = f"{cfg.out_prefix}_d{cfg.d}_coeff_error_evolution.png"
-    loss_path = f"{cfg.out_prefix}_d{cfg.d}_losses.png"
+    coeff_evo_path = f"{cfg.out_prefix}_d{cfg.d}_r{cfg.rank}_coeff_error_evolution.png"
+    loss_path = f"{cfg.out_prefix}_d{cfg.d}_r{cfg.rank}_losses.png"
 
     plot_coefficient_error_evolution(all_coeff_diag, coeff_evo_path)
     plot_losses(all_losses, loss_path)

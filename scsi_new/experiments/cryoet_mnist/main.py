@@ -54,6 +54,7 @@ if __name__ == "__main__":
     # Load observations from MNIST dataset
     observations = build_observations(config.dataset)
 
+    # Visualization setup
     global_step = [0]
     viz_pool = build_viz_pool(config.dataset, n_pool=config.viz.n_pool, viz_seed=config.viz.seed)
     fixed = {k: v[:config.viz.n_display] for k, v in viz_pool.items()}

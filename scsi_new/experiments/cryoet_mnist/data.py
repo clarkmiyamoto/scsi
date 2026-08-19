@@ -53,14 +53,6 @@ def build_observations(config: Config_Dataset_MNIST) -> Dataset:
 def build_warmup(observations: Dataset, config: Config_Dataset_MNIST) -> Dataset:
     '''
     Builds a classical-recon warmup dataset: (x_hat, y) pairs for mstep_lifted's initialization.
-
-    Stays pose-blind: build_observations() discards the true rotation it used, so it's never
-    available here. Instead pseudoinverse() is handed a FRESH, independently-sampled theta per
-    batch -- correct num_tilts/tilt_increment (known from config), but an unknown/arbitrary
-    start offset. FBP is equivariant to a uniform shift of the assumed angle set, so this still
-    recovers a validly-shaped reconstruction of the true digit, just at an unknown absolute
-    rotation -- fine for a warm start, since mstep_lifted only needs (x_hat, y) to be
-    self-consistent under SOME pose, not the true one.
     '''
     batch_size = 516
 
@@ -72,11 +64,7 @@ def build_warmup(observations: Dataset, config: Config_Dataset_MNIST) -> Dataset
     xhat_batch = []
     y_batch = []
 
-    # Generate pseudoinverses. theta is (re)sampled per batch, sized to that batch's actual
-    # count -- NOT a fixed outer `batch_size` -- so a ragged last batch (dataset size not a
-    # multiple of batch_size) still gets one theta row per item instead of silently reusing
-    # rows of a stale, mis-sized theta tensor built before the loop.
-    for (y,) in dataloader_observations:  # dataloader_observations yields (y,) tuples -- unpack
+    for (y,) in dataloader_observations: 
         theta = sample_tilt_series_angles(y.size(0), config.num_tilts, tilt_increment_rad,
                                           device=device)
         x_hat = pseudoinverse(y, theta, config.filtered, config.filter_type)
@@ -88,29 +76,6 @@ def build_warmup(observations: Dataset, config: Config_Dataset_MNIST) -> Dataset
     y_warmup = torch.cat(y_batch, dim=0)
 
     return TensorDataset(x_warmup, y_warmup)
-
-def build_viz_pool(config: Config_Dataset_MNIST, n_pool: int, viz_seed: int) -> dict:
-    '''
-    Small diagnostic pool for wandb viz: n_pool images at deterministic positions in the SAME
-    training subset build_observations() draws from (so they're guaranteed in-distribution), with
-    a fixed x0/theta/y seeded independently by viz_seed (comparable across hyperparameter
-    sweeps). Runs entirely on CPU with the CPU RNG state saved/restored, so it has no effect on
-    the rest of the run's RNG stream.
-    '''
-    dataset_gt = load_mnist_subset(config)
-    idx = torch.linspace(0, len(dataset_gt) - 1, n_pool).round().long().tolist()
-    x_gt = torch.stack([dataset_gt[i][0] for i in idx], dim=0)
-
-    rng_state = torch.get_rng_state()
-    torch.manual_seed(viz_seed)
-    x0 = torch.randn(x_gt.size(0), 1, config.image_size, config.image_size)
-    tilt_increment_rad = config.tilt_increment_deg * torch.pi / 180.0
-    theta = sample_tilt_series_angles(x_gt.size(0), config.num_tilts, tilt_increment_rad)
-    y = corruption_channel(x_gt, thetas=theta, noise_std=config.noise_std)
-    torch.set_rng_state(rng_state)
-
-    return {"x_gt": x_gt, "x0": x0, "theta": theta, "y": y}
-
 
 def load_mnist_subset(config: Config_Dataset_MNIST) -> Dataset:
     """
@@ -146,6 +111,27 @@ def load_mnist_subset(config: Config_Dataset_MNIST) -> Dataset:
 
     return ConcatDataset(chunks)
 
+def build_viz_pool(config: Config_Dataset_MNIST, n_pool: int, viz_seed: int) -> dict:
+    '''
+    Small diagnostic pool for wandb viz: n_pool images at deterministic positions in the SAME
+    training subset build_observations() draws from (so they're guaranteed in-distribution), with
+    a fixed x0/theta/y seeded independently by viz_seed (comparable across hyperparameter
+    sweeps). Runs entirely on CPU with the CPU RNG state saved/restored, so it has no effect on
+    the rest of the run's RNG stream.
+    '''
+    dataset_gt = load_mnist_subset(config)
+    idx = torch.linspace(0, len(dataset_gt) - 1, n_pool).round().long().tolist()
+    x_gt = torch.stack([dataset_gt[i][0] for i in idx], dim=0)
+
+    rng_state = torch.get_rng_state()
+    torch.manual_seed(viz_seed)
+    x0 = torch.randn(x_gt.size(0), 1, config.image_size, config.image_size)
+    tilt_increment_rad = config.tilt_increment_deg * torch.pi / 180.0
+    theta = sample_tilt_series_angles(x_gt.size(0), config.num_tilts, tilt_increment_rad)
+    y = corruption_channel(x_gt, thetas=theta, noise_std=config.noise_std)
+    torch.set_rng_state(rng_state)
+
+    return {"x_gt": x_gt, "x0": x0, "theta": theta, "y": y}
 
 if __name__ == "__main__":
     # Visualization CLI: gallery of GT digit / observed sinogram / pseudoinverse warm start.

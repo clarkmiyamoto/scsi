@@ -30,6 +30,17 @@ a full 2D image, reconstructed via a `ConditionalVelocityMRA` that reuses the Cr
 suffixed `_mra` and lives in the SAME file as its 2D CryoEM counterpart, mirroring the `_3d`
 convention above — except one wholly new entry point, `main_mra_rotation.py`, mirroring `main.py`.
 
+**This package also contains a 2D Gaussian-mixture (GMM) + AWGN toy generalization**, living in
+its OWN subdirectory, `gmm/` (see "Gaussian-mixture (GMM) + AWGN toy generalization" below) —
+unlike the `_3d`/`_mra` generalizations above, which live inline in the SAME files as the 2D
+CryoEM pipeline. `gmm/` is a notebook-driven playground for comparing MLP weight-initialization
+schemes under SCSI, not a new corruption channel for the CryoEM digit-recovery problem: the
+"clean signal" is a 2D point drawn from a Gaussian mixture, not an MNIST digit, and the channel
+is plain AWGN (`y = x + W`, no rotation/projection/pose at all). It deliberately imports
+`si.interpolant`/`ode.sample_joint` unmodified rather than reimplementing the stochastic-
+interpolant math — see the new section below for why it needed thin `_gmm`-suffixed siblings of
+`scsi.propose_estep`/`loss_func_joint` instead of importing those two directly.
+
 ## Algorithm
 
 ```
@@ -82,6 +93,7 @@ own section below — it deliberately does not reuse `scsi.py::train_mstep`.
 | `test_so3_math.py` | **NEW FILE, validation gate for the 3D generalization — run to green BEFORE trusting `pretrain_3d.py`/`main_3d.py` output.** Plain-assert script (`uv run python test_so3_math.py`), pytest-compatible. Checks: Gram-Schmidt output is always a proper rotation; the 6D<->matrix round-trip is exact; the tilt-series composition order shares one physical axis per acquisition (see gotcha below — this is the single highest-risk correctness surface in the 3D generalization); rotating a volume doesn't change its projected mass (catches clipping/margin bugs); the pose-branch interpolant/integrator pairing is exact for the `linear` schedule. |
 | `classical_recon.py` / `classical_recon_3d.py` | **NEW FILES, originally standalone diagnostics — don't touch `si.py`/`scsi.py`/`em.py`/`model.py`, but their `backproject()` function is now ALSO consumed by `pretrain.py`/`pretrain_3d.py`'s `--warmstart_target classical_recon` (lazy-imported, so the default `--warmstart_target gt` path never pays for `skimage`/`matplotlib`).** So "not wired into the SCSI algorithm" no longer describes this pair of files as a whole — only `reconstruct_examples`/`compare`/`compare_mosaic`/the CLI/plotting remain diagnostic-only; `backproject` itself is a real dependency of pretraining now. Filtered backprojection (2D) / weighted backprojection (3D): the classical, non-learned tomographic inversion of the CryoEM/CryoET channel, evaluated as a feasibility check for a possible classical-recon pretraining scheme (an alternative to `pretrain.py`/`pretrain_3d.py`'s GT-supervised `x_hat`, where the pseudo-target would come from inverting a real tilt series instead of a known MNIST label) — a feasibility check since acted upon: see `--warmstart_target classical_recon` above. Both re-derive `corruption.py`'s exact rotate+project geometry as an adjoint operator (ramp-filter each projection — 1D Ram-Lak / 2D radial `\|k\|`, optionally Hann-tapered — smear it back across the summed axis, undo the KNOWN rotation, average) rather than reaching for `skimage.transform.iradon`, which has its own padding/rotation-direction/sinogram-width conventions unrelated to this codebase's channel. Each script sweeps `--n_views` and both `--mode {random,tilt_series}` (`random` = full-coverage upper bound; `tilt_series` = the SAME limited-angle acquisition geometry `main.py`/`main_3d.py`'s EM pool actually produces, real missing-wedge artifacts included), reports Pearson r + SSIM, and saves gallery/sweep PNGs to `classical_recon_eval/` (no wandb — always-local matplotlib output, unlike the rest of this codebase's `--no_wandb` convention). **Every reconstruction uses the TRUE (`theta_star`/`R_star`) pose — these are upper-bound numbers conditional on known pose, not evidence a full pretraining scheme (which would also need pose estimation) is viable; `--mode tilt_series` additionally reconstructs at an ARBITRARY absolute rotation (random per-acquisition start offset/mount), not the canonical frame `pretrain*.py` targets need — see both scripts' module docstrings. `build_classical_recon_pool`/`build_classical_recon_pool_3d` sidestep this SPECIFIC caveat by calling `backproject` directly with `data.build_observations`'s ABSOLUTE `theta_star`/`R_star` (not a tilt-series-relative offset), never going through `reconstruct_examples`'s `--mode tilt_series` gallery path — so pretraining's reconstructions land in the canonical frame correctly; the "raw output isn't on `[-1,1]` scale" caveat two sentences below still applies to them, and is handled by `--recon_calibration`, see the gotcha below.** Empirically (`--debug` aside): filtered recon clearly recovers digit identity by `n_views≈64` at each script's channel-realistic `--noise_std` default (`3.0` 2D / `0.5` 3D, matching `main.py`/`main_3d.py`); the 3D script also surfaces a real (not a bug) depth-axis softening — WBP with a finite view count blurs the GT's sharp extrusion-depth edges into a gradual ramp — which tanks a voxelwise SSIM while the xy\|xz\|yz projection mosaic (what the gallery panel actually shows) still looks sharp; `compare_mosaic` reports that second, more representative number alongside the strict one specifically so this doesn't misread as failure. DC-offset handling (both channels' background is `-1`, not `0`, so every projection carries a constant `-image_size`/`-vol_size` pedestal) and why backprojection uses a fresh zero-padded rotation helper instead of `corruption.rotate_2d`/`rotate_3d` directly (their internal shift-to-`-1` trick would double-shift already-shifted projections) are both documented in `classical_recon.py`'s module docstring — `classical_recon_3d.py` reuses that reasoning by reference rather than repeating it. |
 
+| `gmm/` | **NEW SUBDIRECTORY, not inline in the root files like the `_3d`/`_mra` generalizations.** Self-contained 2D Gaussian-mixture + AWGN toy problem + notebook for comparing MLP weight-initialization schemes under SCSI — see "Gaussian-mixture (GMM) + AWGN toy generalization" below. |
 | `tilt_series_difficulty.py` / `tilt_series_difficulty_3d.py` | **NEW FILES, standalone diagnostics building on `classical_recon.py`/`classical_recon_3d.py` — import `backproject`/`compare` from them rather than duplicating.** Answers a narrower follow-up question than raw reconstruction fidelity: which tilt-series geometries (n_tilts, angular span) are "poor but not hopeless" as a seed for a possible classical-recon pretraining scheme. Three measurements per script: (A) a span x n_tilts quality grid (`tilt_increment_deg = span/n_tilts` per cell) that separates missing-wedge failure (flat rows — span-limited, more tilts don't help) from aliasing (flat columns — density-limited); (B) a multi-acquisition averaging test — reconstructs the SAME digit from K independent random-offset acquisitions and checks whether averaging the K reconstructions recovers most of the per-acquisition quality loss (large gap = acquisition-specific VARIANCE, since each acquisition's missing wedge sits at a different random orientation by construction of `sample_tilt_series_angles`/`sample_tilt_series_rotations_so3` — exactly what SCSI's cross-acquisition pooling is built to exploit; small gap = shared BIAS pooling can't fix); (C) a class-identity nearest-neighbor check — does a reconstruction still best-match its own digit class (by Pearson r) among a labeled pool, independent of raw pixel fidelity. The 3D script runs at deliberately reduced scope (fewer classes, smaller `--vol_size`, coarser grid) since a single-axis SO(3) tilt series leaves a genuinely worse missing region (a whole cone, not a wedge) and 3D reconstructions are heavier — it exists to check whether the 2D conclusion transfers, not to assume it does. **Empirical finding (both channels, `uv run python tilt_series_difficulty.py` / `_3d.py` with defaults): even down to very narrow spans (2°-30°, per-acquisition Pearson r≈0.32-0.50, visually just a directional streak with no recognizable digit) the degradation stays strongly variance-dominated (averaging gap +0.3 to +0.4) and class-identity accuracy stays well above chance (50-100% vs 10-20%) — no sharp cliff into a "hopeless/bias-dominated" regime was found in the tested range; span is the dominant driver of quality, n_tilts/density matters much less at narrow spans.** Same upper-bound-via-known-pose caveat as `classical_recon.py`/`classical_recon_3d.py`; test (B) is additionally an optimistic PROXY — it averages reconstructions of the SAME digit across acquisitions, which real pretraining never gets to do (each SGD step sees exactly one acquisition's reconstruction as its target) — a large averaging gap is evidence the per-acquisition error is non-systematic, a necessary but not sufficient condition for a network trained on many such noisy examples to plausibly learn past it. |
 
 ## How to run
@@ -228,6 +240,77 @@ concept), so `main_mra_rotation.py` has no `--n_tilts`/`--tilt_increment_deg` fl
 to `0.3` (full-image, `[-1,1]`-scale AWGN std, matching `image_2d/main.py`'s own AWGN/MRA
 default) — NOT `main.py`'s `noise_std=3.0`, which is calibrated for the 1D-projected channel's
 much larger summed numeric range.
+
+## Gaussian-mixture (GMM) + AWGN toy generalization
+
+```bash
+cd gmm/                                    # every command below assumes this cwd
+uv run jupyter notebook gmm_scsi_notebook.ipynb   # or open it in VS Code's Jupyter extension
+```
+
+A fourth corruption channel, but unlike the `_3d`/`_mra` generalizations above it is NOT another
+way to recover an MNIST digit — the "clean signal" here is a 2D point `x` drawn from a
+K-component Gaussian mixture, corrupted by plain additive white Gaussian noise,
+`F(x) = x + W`, no rotation/projection/pose latent at all. It exists to let you sweep MLP weight-
+initialization schemes (`gmm/gmm_model.py::INIT_SCHEMES` — default/xavier/kaiming/orthogonal/
+small-normal/large-normal) under the SCSI EM loop on a problem cheap enough to iterate on in a
+notebook, with a closed-form posterior as ground truth (a GMM prior is conjugate to AWGN
+per-component, so `p(x|y)` is itself a K-component GMM — `gmm/gmm_posterior.py`).
+
+**Lives in its own subdirectory, `gmm/`, one level below `si.py`/`ode.py`/`scsi.py`** (every
+other generalization in this file lives inline in the SAME files as the 2D CryoEM pipeline —
+this one doesn't, since its dataset/channel/model have nothing in common with MNIST/CryoEM). All
+new files are prefixed `gmm_` (`gmm_data.py`, `gmm_corruption.py`, `gmm_model.py`, `gmm_scsi.py`,
+`gmm_em.py`, `gmm_posterior.py`, `gmm_plots.py`, `gmm_scsi_notebook.ipynb`) since `data.py`/
+`corruption.py`/`model.py`/`scsi.py`/`em.py` are already taken by the CryoEM pipeline one
+directory up. Because it's nested one level deeper, `gmm_scsi.py` and `gmm_em.py` — the only two
+files that need anything from `mnist_cryoem/`'s root — bootstrap `sys.path` themselves
+(`sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`) rather than relying on a
+bare import; this is `Path(__file__)`-relative, not cwd-relative, so it works regardless of
+where the importing code runs from. The notebook itself only needs a working-directory guard
+(asserts cwd is `gmm/`) plus `sys.path.insert(0, str(Path.cwd()))` for its own sibling
+`gmm_*` imports.
+
+**Imports the actual SCSI algorithm math unmodified — this is the whole point of the exercise.**
+`gmm/gmm_scsi.py` imports `si.interpolant` (the real stochastic-interpolant formula) and
+`ode.sample_joint` (the real ODE integrator) directly, and `gmm/gmm_em.py` imports
+`scsi.sample_pool_indices` directly — none of the three are copied or reimplemented.
+`scsi.propose_estep`/`scsi.loss_func_joint` themselves could NOT be imported unmodified, though:
+each hardcodes exactly one image-shape line (`scsi.py`'s `z_image = torch.randn(B, 1,
+IMAGE_SIZE, IMAGE_SIZE, ...)` inside `propose_estep`, and `t4 = t[:, None, None, None]` inside
+`loss_func_joint`) that assumes a `(B,1,H,W)` image rather than this channel's flat `(B,dim)`
+point. So `gmm_scsi.py::propose_estep_gmm`/`loss_func_gmm` exist as thin siblings — mirroring
+this repo's own established pattern for a new channel (`scsi.py`'s `train_mstep_mra`/
+`loss_func_joint_3d` are both thin siblings of the functions they extend, not rewrites) — with
+exactly those two lines adjusted (`torch.randn(B, dim, device=device)`; `t2 = t[:, None]`,
+the SAME adjustment `loss_func_joint_3d` already makes for its own flat 6D pose branch) and
+everything else unchanged. `gmm_em.py::run_em_gmm` mirrors `em.py::run_em_loop`'s `for k in
+1..K` shape with the checkpoint/wandb machinery stripped out (this package plots via
+`gmm_plots.py`'s matplotlib functions instead, called directly from the notebook — there is no
+GMM equivalent of `wandb_logging.py`). `VelocityMLP` (`gmm_model.py`) has no pose/latent branch
+(`self.pose_branch = None`, the same `ConditionalVelocityMRA`-style single source of truth
+`ode.sample_joint`/`scsi.propose_estep`/`scsi.loss_func_joint` key off elsewhere in this repo).
+
+**One deliberate signature deviation**: `gmm_corruption.py::forward_channel_gmm(x, noise_std)`
+returns `y` ALONE, not the `(y, theta_used)` 2-tuple `corruption.forward_channel`/
+`forward_channel_mra` return — there's no latent/pose for this channel to draw or report back,
+so a `(y, None)` pair would be noise at every call site.
+
+**No wandb** — `gmm/` is matplotlib-only, plotted directly in the notebook via `gmm_plots.py`
+(`plot_loss_curves`, `plot_w2_curves`, `plot_fixed_y_grid`, `plot_marginal`), unlike the rest of
+this package's wandb-first training runs; this is an exploratory "play around" notebook, not a
+long training run worth a persistent dashboard. `gmm_posterior.py::w2_squared_empirical` (exact
+discrete 2-Wasserstein distance between two equal-size empirical point clouds via
+`scipy.optimize.linear_sum_assignment` on the pairwise squared-Euclidean cost matrix — exact by
+Birkhoff's theorem for uniform equal-size empirical measures, not an approximation) is the
+notebook's quantitative score for "does the model's conditional law match the true posterior at
+a fixed `y`" per EM step; note `E[W2²]` between two independent draws of the SAME distribution
+is not itself zero, so the notebook computes a noise-floor reference line rather than expecting
+the curve to reach exactly 0.
+
+`gmm/`'s own gitignored ephemera: none currently — it has no checkpoints/eval-image directories
+of its own (the notebook keeps trained models in memory for the duration of one run rather than
+persisting them to disk).
 
 ## Conventions & gotchas (read before editing)
 

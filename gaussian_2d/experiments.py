@@ -2,12 +2,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from helpers import (
+    effective_rank,
     finite_sample_diagnostics,
     fmt_vec,
     add_mean_std_errorbar,
     add_mean_se_errorbar,
     add_diagnostic_stats_box,
     add_gaussian_contours,
+    equalize_degenerate_axis,
     radius_diagnostics,
     add_radius_diagnostics_box,
     plot_radius_sq_histogram,
@@ -238,6 +240,8 @@ def run_fixed_y(rng, d, mu, Sigma, s2, M, solve_particles, N=1000, y_offset=None
         color="tab:orange",
     )
 
+    equalize_degenerate_axis(ax, dims, post_mean, post_cov)
+
     ax.set_xlabel(rf"$x_{{{i+1}}}$")
     ax.set_ylabel(rf"$x_{{{j+1}}}$")
     ax.legend(loc="upper right")
@@ -245,10 +249,11 @@ def run_fixed_y(rng, d, mu, Sigma, s2, M, solve_particles, N=1000, y_offset=None
     plt.savefig(f"{out_prefix}fixed_y_terminal_law.png", dpi=300)
     plt.show()
 
+    r_post = effective_rank(post_cov)
     plot_radius_sq_histogram(
         X_final, post_mean, post_cov,
         path=f"{out_prefix}fixed_y_r2_hist.png",
-        title=rf"Fixed $y$: Mahalanobis $r^2$ vs $\chi^2_{{{d}}}$ (posterior check)",
+        title=rf"Fixed $y$: Mahalanobis $r^2$ vs $\chi^2_{{{r_post}}}$ (posterior check)",
     )
 
     print("\n================ Fixed y diagnostic ================")
@@ -400,6 +405,8 @@ def run_marginal(rng, d, mu, Sigma, s2, I, solve_particles, N_marginal=3000,
         color="tab:orange",
     )
 
+    equalize_degenerate_axis(ax, dims, mu, Sigma)
+
     ax.set_xlabel(rf"$x_{{{i+1}}}$")
     ax.set_ylabel(rf"$x_{{{j+1}}}$")
     ax.legend(loc="upper right")
@@ -407,10 +414,11 @@ def run_marginal(rng, d, mu, Sigma, s2, I, solve_particles, N_marginal=3000,
     plt.savefig(f"{out_prefix}marginal_recovery.png", dpi=300)
     plt.show()
 
+    r_prior = effective_rank(Sigma)
     plot_radius_sq_histogram(
         X_marginal_final, mu, Sigma,
         path=f"{out_prefix}marginal_r2_hist.png",
-        title=rf"Marginal recovery: Mahalanobis $r^2$ vs $\chi^2_{{{d}}}$",
+        title=rf"Marginal recovery: Mahalanobis $r^2$ vs $\chi^2_{{{r_prior}}}$",
     )
 
     return {
