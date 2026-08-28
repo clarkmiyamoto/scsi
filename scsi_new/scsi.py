@@ -142,7 +142,10 @@ def mstep_lifted(model,
         x_hat, y_hat = x_hat.to(device), y_hat.to(device)
 
         optimizer.zero_grad()
-        ts = torch.rand(x_hat.size(0), 1, 1, 1, device=device)  # Random time for each sample
+        # One random time per sample, broadcastable over whatever spatial rank x_hat has
+        # (B,1,1,1) for 2D images, (B,1,1,1,1) for 3D volumes -- identical to the old
+        # hard-coded 4-tuple for the 2D case.
+        ts = torch.rand(x_hat.size(0), *([1] * (x_hat.dim() - 1)), device=device)
         x0s = base_dist.sample(x_hat.size(0))
         loss = loss_ConditionalDrift(model, x0=x0s, x1=x_hat, t=ts, y=y_hat, interpolant=interpolant)
         loss.backward()
