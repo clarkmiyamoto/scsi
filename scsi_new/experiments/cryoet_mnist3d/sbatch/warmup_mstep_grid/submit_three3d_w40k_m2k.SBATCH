@@ -11,7 +11,8 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=cm6627@nyu.edu
 
-# 3D warmup x M-step "amount of training" grid, digit class 3 only (6,000 images/class).
+# 3D warmup x M-step "amount of training" grid, digit class 3 only, 23,000 images/class
+# (nearly all of EMNIST's 24k threes; MNIST had only ~6.1k).
 # 3D->2D counterpart of ../../../cryoet_mnist/sbatch/warmup_mstep_grid/. That grid runs
 # num_scsi_steps=40; here it is 12 -- a vol_size 32 EM step is ~30x the compute (see RECIPIES.md),
 # so the M-step axis also tops out at 10k rather than the 2D grid's 20k.
@@ -19,6 +20,9 @@
 # Full grid + caveats: ./README.md
 #
 # --time=24:00:00 is a flat budget across the whole grid (user's choice, not a measured number).
+# --mem=48G: n_images_per_class=23000 for a single class -> ~3 GB volume pool. Measured
+# peak host RSS ~9 GB across build_observations/build_warmup; ~13 GB expected on a real
+# run once CUDA context + model host-side land on top. 48G leaves generous headroom.
 # --warmup_batch_size 16 is passed explicitly: args.py overrides the mstep/estep batch defaults
 # for 3D but NOT the warmup one, which would otherwise fall back to 258 and OOM in warmup.
 # Batch 16 was profiled at ~77% of a 48GB L40; --gres=gpu:1 is generic, so a job scheduled onto
@@ -30,7 +34,7 @@ cd /scratch/cm6627/scsi/scsi_new/experiments/cryoet_mnist3d
 
 uv run python main.py \
     --digit_classes 3 \
-    --n_images_per_class 6000 \
+    --n_images_per_class 23000 \
     --warmup_batch_size 16 \
     --mstep_batch_size 16 \
     --estep_batch_size 32 \

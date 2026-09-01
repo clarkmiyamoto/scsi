@@ -18,16 +18,19 @@ class Config:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="SCSI on extruded-MNIST volumes under a 3D CryoET-style channel: a "
+        description="SCSI on extruded EMNIST-digit volumes under a 3D CryoET-style channel: a "
                     "Haar-uniform SO(3) mount + evenly-spaced tilt series about a fixed lab "
                     "axis -> 2D parallel-beam projection -> AWGN. 3D->2D counterpart of "
-                    "experiments/cryoet_mnist."
+                    "experiments/cryoet_mnist (which stays on plain MNIST)."
     )
 
     # --- Dataset ---
     dataset = parser.add_argument_group("dataset")
-    dataset.add_argument("--n_images_per_class", type=int, default=500,
-                         help="10x smaller than the 2D default -- volumes are ~V larger.")
+    dataset.add_argument("--n_images_per_class", type=int, default=23_000,
+                         help="Per-digit draw from EMNIST 'digits' (24k train / 4k test per "
+                              "class). 23k/class = 230k volumes: load_mnist_volumes holds the "
+                              "whole (N,1,V,V,V) pool in RAM (~30 GB at V=32) and "
+                              "build_observations / build_warmup each add a comparable tensor.")
     dataset.add_argument("--vol_size", type=int, default=32,
                          help="Must match model.VOL_SIZE (32).")
     dataset.add_argument("--inplane_size", type=int, default=None,

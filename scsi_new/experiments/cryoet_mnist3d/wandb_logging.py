@@ -3,7 +3,13 @@
 each volume is shown two ways: its central depth (Z) slice and its full depth projection
 (sum along the projection axis -- what the channel would see at zero tilt). Tilt-series
 observations are 2D images already; one representative tilt is shown.
+
+log_reconstruction_grid also emits an interactive 3D point-cloud twin of its volumes at
+viz/{panel}/reconstruction_pc -- GT and x_hat for every display example in one rotatable
+wandb.Object3D scene. See log_reconstruction_pointcloud.
 """
+
+import math
 
 import torch
 import wandb
@@ -29,6 +35,75 @@ def _depth_proj(vol: torch.Tensor) -> torch.Tensor:
 def _central_slice(vol: torch.Tensor) -> torch.Tensor:
     # (..., D, H, W) -> (..., H, W): the middle depth slice.
     return vol[..., vol.size(-3) // 2, :, :]
+
+
+# Point-cloud colours match data.py's marching-cubes isosurface convention.
+_GT_RGB = (76, 114, 176)     # "#4c72b0"
+_HAT_RGB = (196, 78, 82)     # "#c44e52"
+
+
+def _volume_to_points(vol: torch.Tensor, frac: float) -> torch.Tensor:
+    """(D, H, W) volume -> (P, 6) [x=W, y=H, z=D, r, g, b] for the `frac`-brightest
+    voxels, recentred on the volume midpoint (colour left as zeros for the caller).
+
+    An exact value *budget* -- P = round(frac * D*H*W) voxels via topk, identical for
+    every cloud -- rather than a threshold. `vol > c` breaks both ways here: the ODE's
+    x_hat is unclamped and need not sit near [-1, 1] (a fixed c can select ~0 or ~all of
+    it), and the near-binary GT collapses to an empty set whenever its ink fraction
+    exceeds `frac` (every ink voxel ties at the max). topk is bounded away from 0 and
+    D*H*W by construction and uses no RNG. Equal budget for GT and x_hat makes the panel
+    a comparison of geometry, not intensity (the image panel already carries intensity).
+    The midpoint offset is a fixed affine shift applied identically to every volume; it
+    is deliberately NOT a per-cloud centroid, which would slide a displaced x_hat back
+    onto GT and hide the error.
+    """
+    v = vol.detach().float().cpu()
+    k = min(v.numel(), max(1, round(frac * v.numel())))
+    idx = torch.topk(v.flatten(), k, sorted=False).indices
+    occ = torch.stack(torch.unravel_index(idx, v.shape), dim=1).float()   # (P, 3) (d, h, w)
+    center = (torch.tensor(v.shape, dtype=torch.float32) - 1.0) / 2.0
+    d, h, w = occ[:, 0] - center[0], occ[:, 1] - center[1], occ[:, 2] - center[2]
+    xyz = torch.stack([w, h, d], dim=1)
+    return torch.cat([xyz, torch.zeros_like(xyz)], dim=1)
+
+
+@torch.no_grad()
+def log_reconstruction_pointcloud(x_gt, x_hat, em_step, wandb_step, panel_name, frac=0.05):
+    """Interactive 3D point-cloud twin of viz/{panel_name}/reconstruction.
+
+    One rotatable wandb.Object3D scene per call: for each display example, the GT volume
+    (blue) and the model's x_hat (red) as two point clouds. Examples tile a near-square
+    grid on the x/y plane (a single row would be an unviewable strip at n_display=6) and
+    GT/x_hat split along z, so every cell reads GT-then-recon. Reuses the x_hat that
+    log_reconstruction_grid already integrated (no second ODE solve). Only the volumes
+    become point clouds; y / F(x_hat) are 2D tilts and stay in the image panel.
+
+    Uses no RNG (the budget is topk, not a random subsample) so it cannot perturb the
+    training stream.
+    """
+    n, V = x_gt.size(0), x_gt.size(-1)
+    gap = V * 1.6
+    n_cols = max(1, math.ceil(math.sqrt(n)))
+    clouds = []
+    for j in range(n):
+        pairs = ((x_gt[j, 0], _GT_RGB), (x_hat[j, 0], _HAT_RGB))
+        for row, (vol, rgb) in enumerate(pairs):
+            pc = _volume_to_points(vol, frac)
+            if pc.size(0) == 0:
+                continue
+            pc[:, 0] += (j % n_cols) * gap     # examples across x ...
+            pc[:, 1] -= (j // n_cols) * gap    # ... and down y
+            pc[:, 2] += row * gap             # GT at z~0, x_hat offset +z
+            pc[:, 3:] = torch.tensor(rgb, dtype=torch.float32)
+            clouds.append(pc)
+    if not clouds:
+        return
+    arr = torch.cat(clouds, dim=0).numpy()
+    caption = (f"{panel_name} | EM step {em_step} | each cell: GT (blue) then x_hat "
+               f"(red, +z) | top {frac:.0%} of voxels")
+    wandb.log({f"viz/{panel_name}/reconstruction_pc": wandb.Object3D(arr, caption=caption),
+               "em/step": em_step},
+              step=wandb_step)
 
 
 @torch.no_grad()
@@ -76,6 +151,9 @@ def log_reconstruction_grid(model, x0, y, x_gt, config_dataset, n_steps_sampling
     wandb.log({f"viz/{panel_name}/reconstruction": wandb.Image(fig), "em/step": em_step},
               step=wandb_step)
     plt.close(fig)
+
+    # Interactive 3D twin of the volumes in this panel (GT + x_hat), same wandb step.
+    log_reconstruction_pointcloud(x_gt, x_hat, em_step, wandb_step, panel_name)
 
 
 @torch.no_grad()

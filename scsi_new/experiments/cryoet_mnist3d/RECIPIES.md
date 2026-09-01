@@ -1,6 +1,6 @@
 # cryoet_mnist3d — launch recipes
 
-3D->2D counterpart of `../cryoet_mnist`. Extruded-MNIST voxel volumes under a Haar-uniform
+3D->2D counterpart of `../cryoet_mnist`. Extruded EMNIST-digit voxel volumes under a Haar-uniform
 SO(3) "mount" + fixed-axis tilt series -> 2D parallel-beam projection -> AWGN, recovered with
 an EM loop over a `diffusers` `UNet3DConditionModel` velocity field.
 

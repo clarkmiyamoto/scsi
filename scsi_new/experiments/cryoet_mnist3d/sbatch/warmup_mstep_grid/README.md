@@ -1,9 +1,9 @@
 # 3D warmup x mstep grid — digit 3 only
 
-9 SBATCH jobs, one per cell of a 3x3 grid, all reconstructing **only MNIST digit 3**
-(`--digit_classes 3`, `--n_images_per_class 6000`) under the 3D->2D CryoET-style tilt-series
-channel in `experiments/cryoet_mnist3d/main.py`. The 3D counterpart of
-`../../../cryoet_mnist/sbatch/warmup_mstep_grid/` (the 2D digit-3 grid).
+9 SBATCH jobs, one per cell of a 3x3 grid, all reconstructing **only EMNIST digit 3**
+(`--digit_classes 3`, `--n_images_per_class 23000` — nearly all of EMNIST's 24k threes) under
+the 3D->2D CryoET-style tilt-series channel in `experiments/cryoet_mnist3d/main.py`. The 3D
+counterpart of `../../../cryoet_mnist/sbatch/warmup_mstep_grid/` (the 2D digit-3 grid).
 
 Fixed everywhere except the two swept axes: `--num_scsi_steps 12`, `--warmup_batch_size 16`,
 `--mstep_batch_size 16`, `--estep_batch_size 32`.
@@ -30,8 +30,12 @@ mstep are dropped (wall-clock prohibitive — see caveats).
   sets it to 16, matching `mstep_batch_size` so the two swept axes are comparable in
   examples-seen per step.
 - **Batch sizes come from a real profile:** `--warmup_batch_size 16 --mstep_batch_size 16
-  --estep_batch_size 32` measured at ~77% memory on a 48 GB L40. `--n_images_per_class 6000`
-  (same as the 2D grid) fits at that batch.
+  --estep_batch_size 32` measured at ~77% memory on a 48 GB L40. Batch, not pool size, sets
+  GPU memory, so `--n_images_per_class` does not change this.
+- **`--n_images_per_class 23000`** — nearly all of EMNIST's 24k digit-3 images (MNIST had only
+  ~6.1k threes). Single-class, so the pool is ~3 GB; measured peak host RSS is ~9 GB through
+  `build_observations` / `build_warmup`, comfortably inside the unchanged `--mem=48G`.
+  All-10-digit runs are a different story (~30 GB pool, ~78 GB peak); this grid is not that.
 - `--mstep_lr` is left at the `3e-4` default — batch is only 2x the 3D arg default, so the
   sqrt-rule bump (~4e-4) is within noise.
 
@@ -47,10 +51,11 @@ one place.
 for f in submit_three3d_*.SBATCH; do sbatch "$f"; done
 ```
 
-`./data/MNIST` already exists in `experiments/cryoet_mnist3d/`, so the first-use download race
+`./data/EMNIST` already exists in `experiments/cryoet_mnist3d/`, so the first-use download race
 that the 2D grid warns about is a non-issue here — but if you run this on a fresh checkout where
-`./data/MNIST` is absent, submit one job first (or run `uv run python data.py
---n_images_per_class 2` once) before firing the rest, so 9 jobs don't race on the download.
+`./data/EMNIST` is absent, submit one job first (or run `uv run python data.py
+--n_images_per_class 2 --digit_classes 3` once) before firing the rest, so 9 jobs don't race on
+the ~560 MB EMNIST zip download.
 
 ## Known caveats (apply to every cell)
 

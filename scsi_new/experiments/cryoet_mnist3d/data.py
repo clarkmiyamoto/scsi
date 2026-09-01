@@ -1,9 +1,12 @@
 """
-MNIST-under-3D-CryoET dataset assembly: extrude each 2D digit into a voxel volume, then run it
+EMNIST-under-3D-CryoET dataset assembly: extrude each 2D digit into a voxel volume, then run it
 through the 3D->2D tilt-series channel (corruption.corruption_channel). The 3D counterpart of
 cryoet_mnist/data.py -- same shape (a Config dataclass, build_observations -> TensorDataset, a
 separate build_viz_pool, a __main__ visualizer), with `image_size` becoming `vol_size` and the
-digit gaining a depth extent. The __main__ here opens an interactive 3D window (rotatable
+digit gaining a depth extent. Digits come from the EMNIST "digits" split (24k train / 4k test
+per class, ~4x MNIST) and are de-transposed back to MNIST orientation on load; the 2D sibling
+cryoet_mnist/ still uses plain MNIST, so the dataset is one point where the two dirs diverge.
+The __main__ here opens an interactive 3D window (rotatable
 marching-cubes isosurfaces, GT vs build_warmup reconstruction) rather than a 2D slice gallery.
 
 build_warmup here wraps pseudoinverse.py (3D weighted backprojection: radial 2D |k| ramp
@@ -26,6 +29,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset, Dataset, TensorDataset
 from torchvision import datasets
 import torchvision.transforms as transforms
+from PIL import Image
 
 from corruption import corruption_channel
 from rotation import sample_tilt_series_rotations_so3
@@ -43,7 +47,7 @@ _CHANNEL_BATCH = 32
 @dataclass
 class Config_Dataset_MNIST:
     # Dataset
-    n_images_per_class: int = 500        # 10x smaller than the 2D default -- volumes are ~V larger
+    n_images_per_class: int = 23_000     # per-digit draw from EMNIST "digits" (24k train / 4k test per class)
     vol_size: int = VOL_SIZE
     inplane_size: int | None = None      # digit load resolution; default round(vol_size * 0.65)
     depth_extent: int | None = None      # depth band the digit is extruded across; default round(vol_size * 0.25)
@@ -64,10 +68,21 @@ class Config_Dataset_MNIST:
     train: bool = True
 
 
+# EMNIST stores its digits transposed relative to MNIST (a 90-deg rotation + horizontal mirror).
+# Undo it with a main-diagonal reflection BEFORE Resize/ToTensor so every digit lands in MNIST
+# orientation -- skip this and the whole pool trains sideways-and-mirrored.
+_EMNIST_DEORIENT = transforms.Lambda(lambda img: img.transpose(Image.Transpose.TRANSPOSE))
+
+
 def _load_mnist_digits(config: Config_Dataset_MNIST, image_size: int) -> torch.Tensor:
     """
-    n_images_per_class random MNIST digits from EACH class in digit_classes, resized to
-    `image_size`, normalized to [-1, 1], concatenated in digit_classes order.
+    n_images_per_class random EMNIST digits ("digits" split) from EACH class in digit_classes,
+    de-transposed to MNIST orientation, resized to `image_size`, normalized to [-1, 1],
+    concatenated in digit_classes order.
+
+    EMNIST "digits" is class-balanced: 24_000 train / 4_000 test per digit. A per-class request
+    larger than the split (e.g. the 23_000 default under --test_split) is silently truncated to
+    whatever the split holds.
 
     Returns:
         (N, 1, image_size, image_size)
@@ -75,11 +90,13 @@ def _load_mnist_digits(config: Config_Dataset_MNIST, image_size: int) -> torch.T
     digit_classes = config.digit_classes if config.digit_classes is not None else list(range(10))
 
     transform = transforms.Compose([
+        _EMNIST_DEORIENT,
         transforms.Resize(image_size),
         transforms.ToTensor(),
         transforms.Normalize([0.5], [0.5]),
     ])
-    dataset = datasets.MNIST("./data", train=config.train, download=True, transform=transform)
+    dataset = datasets.EMNIST("./data", split="digits", train=config.train, download=True,
+                              transform=transform)
     generator = torch.Generator().manual_seed(config.seed) if config.seed is not None else None
 
     chunks = []
