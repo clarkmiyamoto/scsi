@@ -1,8 +1,7 @@
 """
 3D counterpart of cryoet_mnist/wandb_logging.py. Volumes have no single natural 2D view, so
-each volume is shown two ways: its central depth (Z) slice and its full depth projection
-(sum along the projection axis -- what the channel would see at zero tilt). Tilt-series
-observations are 2D images already; one representative tilt is shown.
+each volume is shown as its central depth (Z) slice. Tilt-series observations are 2D images
+already; one representative tilt is shown.
 
 log_reconstruction_grid also emits an interactive 3D point-cloud twin of its volumes at
 viz/{panel}/reconstruction_pc -- GT and x_hat for every display example in one rotatable
@@ -123,7 +122,7 @@ def log_reconstruction_grid(model, x0, y, x_gt, config_dataset, n_steps_sampling
     y, y_recorrupt = y.cpu(), y_recorrupt.cpu()
     t_show = config_dataset.num_tilts // 2
 
-    row_labels = ["GT z-slice", "GT depth-proj", "x_hat z-slice", "x_hat depth-proj",
+    row_labels = ["GT z-slice", "x_hat z-slice",
                   f"y  tilt {t_show}", f"F(x_hat) tilt {t_show}"]
     fig, axes = plt.subplots(len(row_labels), n, figsize=(2 * n, 2 * len(row_labels)),
                              squeeze=False)
@@ -132,14 +131,12 @@ def log_reconstruction_grid(model, x0, y, x_gt, config_dataset, n_steps_sampling
 
     for j in range(n):
         gt_slice, hat_slice = _central_slice(x_gt[j, 0]), _central_slice(x_hat[j, 0])
-        gt_proj, hat_proj = _depth_proj(x_gt[j, 0]), _depth_proj(x_hat[j, 0])
         y_tilt, yhat_tilt = y[j, t_show, 0], y_recorrupt[j, t_show, 0]
 
-        proj_lo, proj_hi = _pair_scale(gt_proj, hat_proj)
         tilt_lo, tilt_hi = _pair_scale(y_tilt, yhat_tilt)
         panels = [
-            (gt_slice, -1.0, 1.0), (gt_proj, proj_lo, proj_hi),
-            (hat_slice, -1.0, 1.0), (hat_proj, proj_lo, proj_hi),
+            (gt_slice, -1.0, 1.0),
+            (hat_slice, -1.0, 1.0),
             (y_tilt, tilt_lo, tilt_hi), (yhat_tilt, tilt_lo, tilt_hi),
         ]
         for r, (img, lo, hi) in enumerate(panels):
