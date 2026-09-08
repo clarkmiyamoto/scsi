@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--ema", type=float, default=0.999)
     train.add_argument("--eta_min", type=float, default=1e-5,
                        help="LR floor of the cosine schedule spanning all --n_steps_train.")
+    train.add_argument("--checkpoint_steps", type=int, nargs="*", default=[], metavar="STEP",
+                       help="Step counts at which to torch.save a checkpoint (model + EMA + "
+                            "optimizer + scheduler + args). e.g. --checkpoint_steps 5000 20000 40000.")
+    train.add_argument("--checkpoint_dir", type=str, default="checkpoints/cryoet_mnist_supervised",
+                       help="Directory for step_<n>.pt checkpoints (gitignored).")
     train.add_argument("--device", type=str, default=None, choices=["cuda", "mps", "cpu"],
                        help="Default: autodetect cuda -> mps -> cpu.")
 
@@ -100,8 +105,10 @@ def parse_args() -> argparse.Namespace:
     viz.add_argument("--viz_n_display", type=int, default=6)
     viz.add_argument("--viz_n_trajectory_rows", type=int, default=3)
     viz.add_argument("--viz_n_snapshots", type=int, default=8)
-    viz.add_argument("--viz_n_steps_sampling", type=int, default=64,
-                     help="ODE steps used to draw x_hat for the reconstruction panel.")
+    viz.add_argument("--viz_n_steps_sampling", type=int, nargs="+", default=[64], metavar="N",
+                     help="ODE step counts to render the reconstruction/trajectory panels at -- "
+                          "one panel set per value, keyed viz/{fixed,random}/ode<N>/. "
+                          "e.g. --viz_n_steps_sampling 8 32 128.")
     viz.add_argument("--wandb_project", type=str, default="scsi-cryoet-mnist-supervised")
     viz.add_argument("--wandb_run_name", type=str, default=None)
 
@@ -160,20 +167,24 @@ if __name__ == "__main__":
 
     def log_all_panels(round_idx, global_step, ema_model):
         """train_supervised's on_log hook -- the supervised analogue of main.py::log_all_panels.
-        `round_idx` stands in for `em_step`, so wandb_logging.py is reused verbatim."""
+        `round_idx` stands in for `em_step`, so wandb_logging.py is reused verbatim. Each panel
+        is rendered once per --viz_n_steps_sampling value (same x0/y draw, different integrator
+        resolution), under key suffix ode<N>."""
         viz_model = ema_model if args.viz_ema else model
         rand = random_draw(viz_pool, config_dataset, args.viz_n_display)
         for panel_name, src in [("fixed", fixed), ("random", rand)]:
-            log_reconstruction_grid(
-                viz_model, src["x0"], src["theta"], src["y"], src["x_gt"],
-                config_dataset.noise_std, args.viz_n_steps_sampling,
-                round_idx, global_step, panel_name, device,
-            )
-            log_trajectory_grid(
-                viz_model, src["x0"], src["theta"], src["y"],
-                args.viz_n_steps_sampling, args.viz_n_snapshots,
-                args.viz_n_trajectory_rows, round_idx, global_step, panel_name, device,
-            )
+            for n_ode in args.viz_n_steps_sampling:
+                tag = f"{panel_name}/ode{n_ode}"
+                log_reconstruction_grid(
+                    viz_model, src["x0"], src["theta"], src["y"], src["x_gt"],
+                    config_dataset.noise_std, n_ode,
+                    round_idx, global_step, tag, device,
+                )
+                log_trajectory_grid(
+                    viz_model, src["x0"], src["theta"], src["y"],
+                    n_ode, args.viz_n_snapshots,
+                    args.viz_n_trajectory_rows, round_idx, global_step, tag, device,
+                )
 
     train_supervised(
         model, base_dist, dataset,
@@ -187,9 +198,12 @@ if __name__ == "__main__":
             eta_min=args.eta_min,
             log_every=args.log_every,
             seed=args.seed,
+            checkpoint_steps=tuple(args.checkpoint_steps),
+            checkpoint_dir=args.checkpoint_dir,
         ),
         on_log=log_all_panels,
         resample_channel=corruption_channel_bound if args.resample_channel else None,
+        checkpoint_meta={"args": vars(args)},
     )
 
     wandb.finish()
