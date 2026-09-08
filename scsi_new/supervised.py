@@ -1,0 +1,260 @@
+"""
+Supervised stochastic-interpolant training -- the paired-data counterpart to scsi.py.
+
+scsi.py (UNSUPERVISED): only corrupted observations y are available. The EM loop alternates
+estep() -- propose clean x_hat by flowing noise through the current velocity field's ODE,
+conditioned on y -- and mstep_lifted() -- train the conditional velocity net on the proposed
+(x_hat, y_hat) pairs.
+
+supervised.py (SUPERVISED): a dataset of ground-truth pairs {(x_i, F(x_i))}_i is available, so
+there is no posterior to estimate. Fit the conditional velocity net b_t(.|y) directly, by the
+same stochastic-interpolant loss the M-step already uses:
+
+    L = E_{t, z~N(0,I), (x,y)} || b_t(alpha_t z + beta_t x | y) - (alpha_dot_t z + beta_dot_t x) ||^2
+
+The per-step math is delegated verbatim to scsi.mstep_lifted, so a supervised run and one
+unsupervised M-step differ ONLY in where the (x, y) pairs come from -- which is the whole point
+of keeping this around as a baseline.
+
+Each experiment (MNIST / synthetic / MNIST-3D / ...) plugs in via its existing
+data.py / corruption.py / model.py -- this module knows nothing about datatype, model
+architecture, or visualization:
+
+    # main_supervised.py, sitting next to the experiment's own main.py
+    import functools
+    from corruption import corruption_channel
+    from data import load_mnist_subset, build_viz_pool          # experiment-specific
+    from model import ConditionalDiT                             # experiment-specific
+    from distribution import IsotropicGaussian
+    from supervised import (Config_Supervised, build_paired_dataset,
+                            train_supervised, autodetect_device)
+
+    device = autodetect_device()
+    F = functools.partial(corruption_channel, noise_std=cfg.noise_std)  # bind channel params
+    dataset = build_paired_dataset(load_mnist_subset(cfg), F)           # {(x, F(x))}
+    model   = ConditionalDiT(image_size=cfg.image_size).to(device)
+    base    = IsotropicGaussian(shape=(1, cfg.image_size, cfg.image_size), device=device)
+
+    def on_log(round_idx, global_step, ema_model):
+        log_all_panels(em_step=round_idx)      # experiment's existing wandb panels, unchanged
+
+    train_supervised(model, base, dataset, Config_Supervised(), on_log=on_log)
+
+Like scsi.py, this file has no CLI -- each experiment keeps its own argparse in main_supervised.py.
+"""
+
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+
+import torch
+import wandb
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+
+from distribution import Distribution
+from scsi import Config_SCSI_MStep, EMA, mstep_lifted
+
+
+def autodetect_device() -> str:
+    """cuda -> mps -> cpu, at every entry point. Mirror of scsi_args.autodetect_device (kept
+    here so this library file doesn't pull in the CLI-args module)."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+@dataclass
+class Config_Supervised:
+    interpolant_style: str = "gvp"   # "linear" | "gvp" -- handed straight to si.load_interpolant
+    n_steps_train: int = 20_000      # total optimizer steps; one (x, y) minibatch per step
+    batch_size: int = 256
+    lr: float = 3e-4
+    weight_decay: float = 0.0
+    ema: float = 0.999               # EMA decay on the weights, updated once per optimizer step
+    eta_min: float = 1e-5            # LR floor of the cosine schedule spanning ALL n_steps_train
+    log_every: int = 1_000           # steps between on_log callbacks; <= 0 -> only at start & end
+    seed: int | None = 42           # seeds the global RNG at entry (batch order / x0 / channel
+                                     # resampling); the experiment's entry point should still seed
+                                     # before model construction, as main.py does. None -> skip.
+
+
+def build_paired_dataset(x_source: torch.Tensor | Dataset,
+                         corruption_channel: Callable[[torch.Tensor], torch.Tensor],
+                         *,
+                         batch_size: int = 32) -> TensorDataset:
+    """
+    Materialize a supervised training set {(x_i, F(x_i))}_i -- the analogue of an experiment's
+    build_observations(), but keeping the clean x alongside the observation y.
+
+    Args:
+        x_source: clean ground-truth samples -- either a Tensor (N, *shape), or a Dataset that
+            yields 1-tuples (x,) (e.g. the ConcatDataset an experiment's load_mnist_subset
+            returns). x must already be in the shape the velocity net / base_dist expect
+            (synthetic 2D points, for instance, are carried as (2, 1, 1)).
+        corruption_channel: the black-box forward model F, ALREADY functools.partial-bound with
+            its channel params (noise_std, num_tilts, tilt_increment_deg, ...) exactly as
+            main.py binds it. One fresh random realization of F is drawn per sample here, then
+            frozen into the returned dataset.
+        batch_size: how many samples to push through F at once. Small default on purpose: the
+            3D CryoET channel expands each sample to (B*num_tilts, 1, D, H, W) internally for a
+            single grid_sample, so a large batch OOMs (cf. cryoet_mnist3d/data.py's
+            _CHANNEL_BATCH = 32).
+
+    Returns:
+        TensorDataset(x, y), both on x_source's original device.
+    """
+    base = x_source if not isinstance(x_source, torch.Tensor) else TensorDataset(x_source)
+    loader = DataLoader(base, batch_size=batch_size, shuffle=False)
+
+    xs, ys = [], []
+    for (x_batch,) in loader:  # 1-tuple: TensorDataset / load_mnist_subset both yield (x,)
+        xs.append(x_batch)
+        ys.append(corruption_channel(x_batch))
+    return TensorDataset(torch.cat(xs, dim=0), torch.cat(ys, dim=0))
+
+
+class _ResampledPairs(Dataset):
+    """
+    Wraps a clean-x dataset so y = F(x) is re-drawn on every __getitem__ -- fresh channel noise
+    each epoch instead of the single frozen realization build_paired_dataset bakes in. Opt-in
+    via train_supervised(resample_channel=F); the frozen-pool default is the literal reading of
+    the loss in this module's docstring, and matches how build_observations already works.
+
+    Accepts a base whose items are (x, y) / (x,) tuples or bare x tensors -- only x is used.
+    F is applied per sample as F(x[None]).squeeze(0), so it must tolerate a batch dim of 1
+    (every experiment's corruption_channel does).
+    """
+
+    def __init__(self, base: Dataset, corruption_channel: Callable[[torch.Tensor], torch.Tensor]):
+        self.base = base
+        self.corruption_channel = corruption_channel
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, idx: int):
+        item = self.base[idx]
+        x = item[0] if isinstance(item, (tuple, list)) else item
+        y = self.corruption_channel(x.unsqueeze(0)).squeeze(0)
+        return x, y
+
+
+def _chunk_steps(total: int, every: int) -> list[int]:
+    """
+    `total` split into consecutive blocks of at most `every` steps, summing to EXACTLY `total`
+    (the final block absorbs the remainder). This is what keeps the single shared
+    CosineAnnealingLR -- built once for `total` steps, stepped once per optimizer step inside
+    mstep_lifted -- correct no matter how often on_log chops training into rounds. Integer
+    division here would silently train fewer steps and never reach eta_min.
+    """
+    chunks, done = [], 0
+    while done < total:
+        block = min(every, total - done)
+        chunks.append(block)
+        done += block
+    return chunks
+
+
+def _check_dataset(dataset: Dataset, base_dist: Distribution) -> None:
+    first = dataset[0]
+    if not isinstance(first, (tuple, list)) or len(first) < 2:
+        raise ValueError(
+            "train_supervised expects `dataset` to yield (x, y) pairs -- e.g. "
+            "build_paired_dataset(...) output. To regenerate y from a clean-x dataset instead, "
+            "pass resample_channel=F."
+        )
+    expected = getattr(base_dist, "shape", None)
+    if expected is not None and tuple(first[0].shape) != tuple(expected):
+        raise ValueError(
+            f"train_supervised: dataset x sample has shape {tuple(first[0].shape)}, but "
+            f"base_dist samples {tuple(expected)}. si.Interpolant does alpha_t*z + beta_t*x with "
+            f"no broadcasting slack -- reshape x when you build the dataset (synthetic 2D points, "
+            f"for instance, are carried as (2, 1, 1): x.view(-1, 2, 1, 1))."
+        )
+
+
+def train_supervised(
+    model: torch.nn.Module,
+    base_dist: Distribution,
+    dataset: Dataset,
+    config: Config_Supervised,
+    *,
+    on_log: Callable[[int, int, torch.nn.Module], None] | None = None,
+    resample_channel: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[torch.nn.Module, torch.nn.Module]:
+    """
+    Fit `model` -- a conditional velocity net with forward(x_t, t, y) -> v -- on ground-truth
+    (x, y) pairs by the stochastic-interpolant loss. Builds its own AdamW + a single global
+    CosineAnnealingLR spanning the full config.n_steps_train (so the LR reaches config.eta_min
+    exactly once, at the end) + EMA, then feeds each block of steps to scsi.mstep_lifted.
+
+    Args:
+        model: velocity net, already placed on its device by the caller (this function moves
+            nothing).
+        base_dist: noise source z. base_dist.shape, if present, MUST equal the dataset's x
+            sample shape -- see _check_dataset.
+        dataset: yields (x, y) pairs, e.g. build_paired_dataset(...) output. A clean-x dataset
+            (or bare tensor) is also fine when resample_channel is given.
+        config: Config_Supervised.
+        on_log: optional callback(round_idx, global_step, ema_model). Fired once before any
+            training (round_idx = 0) and after every config.log_every steps. Pass round_idx as
+            the `em_step` argument of the experiment's existing wandb panels and they work
+            verbatim; ema_model is handed in because the caller can't close over an EMA this
+            function builds.
+        resample_channel: optional F, functools.partial-bound with channel params. When given,
+            y is re-drawn as F(x) on every batch fetch (fresh channel noise each epoch) rather
+            than read from `dataset`. Default None -> frozen pool.
+
+    Returns:
+        (model, ema_model) -- the live weights and their EMA.
+    """
+    if config.seed is not None:
+        torch.manual_seed(config.seed)
+
+    if resample_channel is not None:
+        dataset = _ResampledPairs(dataset, resample_channel)
+    _check_dataset(dataset, base_dist)
+
+    optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=config.n_steps_train, eta_min=config.eta_min)
+    ema = EMA(model, decay=config.ema)
+
+    # mstep_lifted reads only .interpolant_style / .n_steps_train / .batch_size off this; lr /
+    # weight_decay / ema are already baked into optimizer + ema above. n_steps_train is swapped
+    # per chunk below via dataclasses.replace.
+    mstep_cfg = Config_SCSI_MStep(
+        interpolant_style=config.interpolant_style,
+        n_steps_train=config.n_steps_train,
+        batch_size=config.batch_size,
+        lr=config.lr,
+        weight_decay=config.weight_decay,
+        ema=config.ema,
+    )
+
+    # mstep_lifted logs to wandb unconditionally when global_step is not None; pass None when no
+    # run is active so a wandb-less supervised run still trains (CLAUDE.md: logging degrades
+    # gracefully). The callback still gets a monotone step count either way.
+    wandb_on = getattr(wandb, "run", None) is not None
+    global_step = [0]
+    steps_done = 0
+
+    if on_log is not None:
+        on_log(0, 0, ema.ema_model)
+
+    every = config.n_steps_train if config.log_every <= 0 else config.log_every
+    for round_idx, chunk in enumerate(_chunk_steps(config.n_steps_train, every), start=1):
+        mstep_lifted(
+            model, base_dist, dataset, optimizer,
+            replace(mstep_cfg, n_steps_train=chunk),
+            scheduler=scheduler, ema=ema,
+            global_step=global_step if wandb_on else None,
+            log_prefix="train",
+        )
+        steps_done += chunk
+        if on_log is not None:
+            on_log(round_idx, global_step[0] if wandb_on else steps_done, ema.ema_model)
+
+    return model, ema.ema_model
