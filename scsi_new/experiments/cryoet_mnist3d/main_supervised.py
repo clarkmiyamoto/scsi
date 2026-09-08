@@ -19,7 +19,7 @@ import wandb
 from corruption import corruption_channel  # black box forward model
 from data import Config_Dataset_MNIST, load_mnist_volumes, build_viz_pool
 from distribution import IsotropicGaussian
-from model import ConditionalVelocityCryoET3D
+from model import build_velocity_model
 from supervised import Config_Supervised, autodetect_device, build_paired_dataset, train_supervised
 from wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
 
@@ -87,13 +87,32 @@ def parse_args() -> argparse.Namespace:
                               "noise) instead of freezing one realization per volume. Slow: the "
                               "channel then runs per-sample inside the dataloader.")
 
-    # --- Model (mirrors experiments/cryoet_mnist3d/args.py) ---
+    # --- Model (mirrors experiments/cryoet_mnist3d/args.py, plus a DiT backbone option) ---
     model_grp = parser.add_argument_group("model")
+    model_grp.add_argument("--arch", type=str, default="unet", choices=["unet", "dit"],
+                           help="Velocity-net backbone. 'unet' = ConditionalVelocityCryoET3D "
+                                "(diffusers video-UNet, the original / main.py default); 'dit' = "
+                                "ConditionalDiTCryoET3D (volumetric 3D-patch DiT, full 3D "
+                                "self-attention, adaLN-Zero time conditioning). Both take the "
+                                "same (x_t, t, y) and quantise t to 1000 bins identically.")
     model_grp.add_argument("--block_out_channels", type=int, nargs="+",
                            default=[64, 128, 256, 256],
-                           help="Per-level UNet3D channel widths; #levels sets the spatial "
-                                "downsampling depth.")
-    model_grp.add_argument("--layers_per_block", type=int, default=2)
+                           help="[--arch unet] Per-level UNet3D channel widths; #levels sets the "
+                                "spatial downsampling depth.")
+    model_grp.add_argument("--layers_per_block", type=int, default=2,
+                           help="[--arch unet] Residual blocks per UNet3D level.")
+    model_grp.add_argument("--patch_size", type=int, default=4,
+                           help="[--arch dit] Cubic patch edge; token grid is "
+                                "(vol_size / patch_size)**3 (32/4 -> 512 tokens). Must divide vol_size.")
+    model_grp.add_argument("--dit_hidden", type=int, default=384,
+                           help="[--arch dit] Transformer width. Must be divisible by --dit_heads.")
+    model_grp.add_argument("--dit_depth", type=int, default=12,
+                           help="[--arch dit] Number of transformer blocks (~33M params at the "
+                                "384/12/6 default, close to the UNet's ~37M).")
+    model_grp.add_argument("--dit_heads", type=int, default=6,
+                           help="[--arch dit] Attention heads.")
+    model_grp.add_argument("--dit_mlp_ratio", type=float, default=4.0,
+                           help="[--arch dit] Feed-forward expansion ratio.")
 
     # --- Supervised training (-> supervised.Config_Supervised) ---
     train = parser.add_argument_group("supervised training")
@@ -176,11 +195,17 @@ if __name__ == "__main__":
     )
 
     # Model & noise source
-    model = ConditionalVelocityCryoET3D(
+    model = build_velocity_model(
+        args.arch,
         vol_size=V,
         num_tilts=args.num_tilts,
         block_out_channels=tuple(args.block_out_channels),
         layers_per_block=args.layers_per_block,
+        patch_size=args.patch_size,
+        dit_hidden=args.dit_hidden,
+        dit_depth=args.dit_depth,
+        dit_heads=args.dit_heads,
+        dit_mlp_ratio=args.dit_mlp_ratio,
     ).to(device)
     base_dist = IsotropicGaussian(shape=(1, V, V, V), device=device)
 
