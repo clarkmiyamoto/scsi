@@ -85,7 +85,7 @@ def sample_tilt_series_rotations_so3(
     axis = torch.tensor(tilt_axis, device=device, dtype=start.dtype)
     R_tilt = axis_angle_to_matrix(axis, angles).reshape(n_acquisitions, n_tilts, 3, 3)
     # return R_tilt @ R_mount[:, None, :, :]                                            # (n_acq, T, 3, 3)
-    return R_mount[:, None] @ R_tilt
+    return R_mount[:, None, :, :] @ R_tilt
 
 
 def rotate_3d(x: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
