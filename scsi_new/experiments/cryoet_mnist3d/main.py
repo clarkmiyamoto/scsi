@@ -17,7 +17,7 @@ import wandb
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from corruption import corruption_channel  # black box forward model
+from corruption import corruption_channel, build_pair_sample  # black box forward model
 from data import build_observations, build_warmup, build_viz_pool
 from distribution import IsotropicGaussian
 from model import ConditionalVelocityCryoET3D
@@ -95,12 +95,14 @@ if __name__ == "__main__":
         noise_std=config.dataset.noise_std,
         tilt_axis=config.dataset.tilt_axis,
     )
+    # (x̂) -> (target, ŷ). --lift makes target = R·x̂ for a fresh independent random SO(3) R.
+    pair_sample = build_pair_sample(corruption_channel_bound, lift=config.lift)
 
     # Run SCSI algorithm
     for k in range(config.scsi.num_scsi_steps):
         # E-step: sample from the posterior over latent clean volumes given the observations
         posterior_samples = estep(
-            model, base_dist, observations, corruption_channel_bound, config.scsi.estep
+            model, base_dist, observations, pair_sample, config.scsi.estep
         )
 
         # M-step: update model parameters to maximize expected log-likelihood

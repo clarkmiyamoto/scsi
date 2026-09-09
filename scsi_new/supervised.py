@@ -26,12 +26,13 @@ architecture, or visualization:
     from data import load_mnist_subset, build_viz_pool          # experiment-specific
     from model import ConditionalDiT                             # experiment-specific
     from distribution import IsotropicGaussian
+    from scsi import basic_pair
     from supervised import (Config_Supervised, build_paired_dataset,
                             train_supervised, autodetect_device)
 
     device = autodetect_device()
     F = functools.partial(corruption_channel, noise_std=cfg.noise_std)  # bind channel params
-    dataset = build_paired_dataset(load_mnist_subset(cfg), F)           # {(x, F(x))}
+    dataset = build_paired_dataset(load_mnist_subset(cfg), basic_pair(F))   # {(x, F(x))}
     model   = ConditionalDiT(image_size=cfg.image_size).to(device)
     base    = IsotropicGaussian(shape=(1, cfg.image_size, cfg.image_size), device=device)
 
@@ -87,55 +88,60 @@ class Config_Supervised:
 
 
 def build_paired_dataset(x_source: torch.Tensor | Dataset,
-                         corruption_channel: Callable[[torch.Tensor], torch.Tensor],
+                         pair_sample: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
                          *,
                          batch_size: int = 32) -> TensorDataset:
     """
-    Materialize a supervised training set {(x_i, F(x_i))}_i -- the analogue of an experiment's
-    build_observations(), but keeping the clean x alongside the observation y.
+    Materialize a supervised training set {(target_i, y_i)}_i -- the analogue of an experiment's
+    build_observations(), but keeping a clean target alongside the observation y.
 
     Args:
         x_source: clean ground-truth samples -- either a Tensor (N, *shape), or a Dataset that
             yields 1-tuples (x,) (e.g. the ConcatDataset an experiment's load_mnist_subset
             returns). x must already be in the shape the velocity net / base_dist expect
             (synthetic 2D points, for instance, are carried as (2, 1, 1)).
-        corruption_channel: the black-box forward model F, ALREADY functools.partial-bound with
-            its channel params (noise_std, num_tilts, tilt_increment_deg, ...) exactly as
-            main.py binds it. One fresh random realization of F is drawn per sample here, then
-            frozen into the returned dataset.
-        batch_size: how many samples to push through F at once. Small default on purpose: the
-            3D CryoET channel expands each sample to (B*num_tilts, 1, D, H, W) internally for a
-            single grid_sample, so a large batch OOMs (cf. cryoet_mnist3d/data.py's
-            _CHANNEL_BATCH = 32).
+        pair_sample: `(x_batch) -> (target_batch, y_batch)`. The default is scsi.basic_pair(F)
+            -- identity target, y = F(x) -- with F ALREADY functools.partial-bound with its
+            channel params exactly as main.py binds it. The CryoET experiments pass
+            corruption.build_pair_sample(F, lift=...) instead, whose lifted variant returns
+            (R.x, F(x)) for a fresh independent Haar rotation R. One realization is drawn per
+            sample here, then frozen into the returned dataset.
+        batch_size: how many samples to push through pair_sample at once. Small default on
+            purpose: the 3D CryoET channel expands each sample to (B*num_tilts, 1, D, H, W)
+            internally for a single grid_sample, so a large batch OOMs (cf.
+            cryoet_mnist3d/data.py's _CHANNEL_BATCH = 32).
 
     Returns:
-        TensorDataset(x, y), both on x_source's original device.
+        TensorDataset(target, y), both on x_source's original device.
     """
     base = x_source if not isinstance(x_source, torch.Tensor) else TensorDataset(x_source)
     loader = DataLoader(base, batch_size=batch_size, shuffle=False)
 
     xs, ys = [], []
     for (x_batch,) in loader:  # 1-tuple: TensorDataset / load_mnist_subset both yield (x,)
-        xs.append(x_batch)
-        ys.append(corruption_channel(x_batch))
+        t_batch, y_batch = pair_sample(x_batch)
+        xs.append(t_batch)
+        ys.append(y_batch)
     return TensorDataset(torch.cat(xs, dim=0), torch.cat(ys, dim=0))
 
 
 class _ResampledPairs(Dataset):
     """
-    Wraps a clean-x dataset so y = F(x) is re-drawn on every __getitem__ -- fresh channel noise
-    each epoch instead of the single frozen realization build_paired_dataset bakes in. Opt-in
-    via train_supervised(resample_channel=F); the frozen-pool default is the literal reading of
-    the loss in this module's docstring, and matches how build_observations already works.
+    Wraps a clean-x dataset so (target, y) is re-drawn on every __getitem__ -- fresh channel
+    noise (and, for a lifting pair_sample, a fresh rotation R) each epoch instead of the single
+    frozen realization build_paired_dataset bakes in. Opt-in via
+    train_supervised(resample_pair_sample=pair_sample); the frozen-pool default is the literal
+    reading of the loss in this module's docstring, and matches how build_observations works.
 
     Accepts a base whose items are (x, y) / (x,) tuples or bare x tensors -- only x is used.
-    F is applied per sample as F(x[None]).squeeze(0), so it must tolerate a batch dim of 1
-    (every experiment's corruption_channel does).
+    pair_sample is applied per sample as pair_sample(x[None]) then squeezed, so it must tolerate
+    a batch dim of 1 (every experiment's corruption_channel does).
     """
 
-    def __init__(self, base: Dataset, corruption_channel: Callable[[torch.Tensor], torch.Tensor]):
+    def __init__(self, base: Dataset,
+                 pair_sample: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]):
         self.base = base
-        self.corruption_channel = corruption_channel
+        self.pair_sample = pair_sample
 
     def __len__(self) -> int:
         return len(self.base)
@@ -143,8 +149,8 @@ class _ResampledPairs(Dataset):
     def __getitem__(self, idx: int):
         item = self.base[idx]
         x = item[0] if isinstance(item, (tuple, list)) else item
-        y = self.corruption_channel(x.unsqueeze(0)).squeeze(0)
-        return x, y
+        t, y = self.pair_sample(x.unsqueeze(0))
+        return t.squeeze(0), y.squeeze(0)
 
 
 def _training_plan(total: int, log_every: int,
@@ -192,9 +198,9 @@ def _check_dataset(dataset: Dataset, base_dist: Distribution) -> None:
     first = dataset[0]
     if not isinstance(first, (tuple, list)) or len(first) < 2:
         raise ValueError(
-            "train_supervised expects `dataset` to yield (x, y) pairs -- e.g. "
+            "train_supervised expects `dataset` to yield (target, y) pairs -- e.g. "
             "build_paired_dataset(...) output. To regenerate y from a clean-x dataset instead, "
-            "pass resample_channel=F."
+            "pass resample_pair_sample=pair_sample."
         )
     expected = getattr(base_dist, "shape", None)
     if expected is not None and tuple(first[0].shape) != tuple(expected):
@@ -213,7 +219,7 @@ def train_supervised(
     config: Config_Supervised,
     *,
     on_log: Callable[[int, int, torch.nn.Module], None] | None = None,
-    resample_channel: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    resample_pair_sample: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None = None,
     checkpoint_meta: dict | None = None,
 ) -> tuple[torch.nn.Module, torch.nn.Module]:
     """
@@ -232,17 +238,18 @@ def train_supervised(
             nothing).
         base_dist: noise source z. base_dist.shape, if present, MUST equal the dataset's x
             sample shape -- see _check_dataset.
-        dataset: yields (x, y) pairs, e.g. build_paired_dataset(...) output. A clean-x dataset
-            (or bare tensor) is also fine when resample_channel is given.
+        dataset: yields (target, y) pairs, e.g. build_paired_dataset(...) output. A clean-x
+            dataset (or bare tensor) is also fine when resample_pair_sample is given.
         config: Config_Supervised.
         on_log: optional callback(round_idx, global_step, ema_model). Fired once before any
             training (round_idx = 0) and after every config.log_every steps. Pass round_idx as
             the `em_step` argument of the experiment's existing wandb panels and they work
             verbatim; ema_model is handed in because the caller can't close over an EMA this
             function builds.
-        resample_channel: optional F, functools.partial-bound with channel params. When given,
-            y is re-drawn as F(x) on every batch fetch (fresh channel noise each epoch) rather
-            than read from `dataset`. Default None -> frozen pool.
+        resample_pair_sample: optional `(x) -> (target, y)` callable (scsi.basic_pair(F) or an
+            experiment's corruption.build_pair_sample(F, lift=...)). When given, (target, y) is
+            re-drawn on every batch fetch (fresh channel noise -- and fresh rotation R when
+            lifting -- each epoch) rather than read from `dataset`. Default None -> frozen pool.
         checkpoint_meta: optional dict stashed verbatim into every checkpoint under "meta"
             (e.g. {"args": vars(args)} so the run is reconstructible from the .pt alone).
 
@@ -252,8 +259,8 @@ def train_supervised(
     if config.seed is not None:
         torch.manual_seed(config.seed)
 
-    if resample_channel is not None:
-        dataset = _ResampledPairs(dataset, resample_channel)
+    if resample_pair_sample is not None:
+        dataset = _ResampledPairs(dataset, resample_pair_sample)
     _check_dataset(dataset, base_dist)
 
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)

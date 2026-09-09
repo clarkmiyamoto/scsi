@@ -16,7 +16,7 @@ import functools
 import torch
 import wandb
 
-from corruption import corruption_channel  # black box forward model
+from corruption import corruption_channel, build_pair_sample  # black box forward model
 from data import Config_Dataset_MNIST, load_mnist_subset, build_viz_pool
 from distribution import IsotropicGaussian
 from model import ConditionalVelocityCryoET
@@ -66,8 +66,15 @@ def parse_args() -> argparse.Namespace:
     channel.add_argument("--channel_batch_size", type=int, default=512,
                          help="Samples per forward-model call when materializing {x, F(x)}.")
     channel.add_argument("--resample_channel", action="store_true",
-                         help="Re-draw F(x) every epoch (fresh tilt series + noise) instead of "
-                              "freezing one realization per digit.")
+                         help="Re-draw F(x) (and, with --lift, the rotation R) every epoch "
+                              "instead of freezing one realization per digit.")
+    channel.add_argument("--lift", dest="lift", action="store_true", default=True,
+                         help="Train on (R.x, F(x)) with R a fresh independent random SO(2) "
+                              "rotation, symmetrizing the target over the rotation group so "
+                              "b_t(.|y) is rotation-invariant (corruption.build_pair_sample). "
+                              "Default: on.")
+    channel.add_argument("--no_lift", dest="lift", action="store_false",
+                         help="Use the canonical (x, F(x)) target (the old behavior).")
 
     # --- Model (mirrors experiments/cryoet_mnist/args.py) ---
     model_grp = parser.add_argument_group("model")
@@ -146,6 +153,8 @@ if __name__ == "__main__":
         tilt_increment_deg=args.tilt_increment_deg,
         noise_std=args.noise_std,
     )
+    # (x) -> (target, F(x)). --lift (default) makes target = R·x for a fresh independent SO(2) R.
+    pair_sample = build_pair_sample(corruption_channel_bound, lift=args.lift)
 
     # Model & noise source
     model = ConditionalVelocityCryoET(
@@ -157,7 +166,7 @@ if __name__ == "__main__":
 
     # Supervised training set: {(x_i, F(x_i))} -- clean digits paired with their corruption.
     dataset = build_paired_dataset(
-        load_mnist_subset(config_dataset), corruption_channel_bound,
+        load_mnist_subset(config_dataset), pair_sample,
         batch_size=args.channel_batch_size,
     )
 
@@ -202,7 +211,7 @@ if __name__ == "__main__":
             checkpoint_dir=args.checkpoint_dir,
         ),
         on_log=log_all_panels,
-        resample_channel=corruption_channel_bound if args.resample_channel else None,
+        resample_pair_sample=pair_sample if args.resample_channel else None,
         checkpoint_meta={"args": vars(args)},
     )
 

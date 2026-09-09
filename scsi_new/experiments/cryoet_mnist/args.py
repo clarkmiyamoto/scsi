@@ -14,6 +14,9 @@ class Config:
     viz: Config_Viz
     arch: str = "dit"           # image branch backbone: "dit" or "unet"
     patch_size: int = 4         # only used when arch == "dit"
+    lift: bool = False          # E-step pairs (R.x_hat, F(x_hat)), R a fresh independent SO(2)
+                                # rotation (corruption.build_pair_sample). Default off: preserves
+                                # in-flight SCSI runs. main_supervised.py defaults this on.
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +42,13 @@ def parse_args() -> argparse.Namespace:
     channel.add_argument("--num_tilts", type=int, default=16)
     channel.add_argument("--tilt_increment_deg", type=float, default=7.5)
     channel.add_argument("--noise_std", type=float, default=3.0)
+    channel.add_argument("--lift", dest="lift", action="store_true", default=False,
+                         help="Train the E-step / M-step on (R.x, F(x)) with R a fresh "
+                              "independent random SO(2) rotation, instead of the canonical "
+                              "(x, F(x)). Symmetrizes the target over the rotation group -- see "
+                              "corruption.build_pair_sample. Default: off (preserves in-flight runs).")
+    channel.add_argument("--no_lift", dest="lift", action="store_false",
+                         help="Canonical (x, F(x)) target (the default).")
 
     # --- Warmup pseudoinverse (classical FBP warm start) ---
     warmup_recon = parser.add_argument_group("warmup pseudoinverse")
@@ -76,4 +86,4 @@ def config_from_args(args: argparse.Namespace) -> Config:
     warmup, scsi_config, viz = scsi_configs_from_args(args)
 
     return Config(dataset=dataset, warmup=warmup, scsi=scsi_config, viz=viz,
-                  arch=args.arch, patch_size=args.patch_size)
+                  arch=args.arch, patch_size=args.patch_size, lift=args.lift)

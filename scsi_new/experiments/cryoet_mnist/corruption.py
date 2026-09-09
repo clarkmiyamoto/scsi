@@ -5,7 +5,7 @@ this file only adds the projection operator and the noise/tilt-series assembly o
 """
 
 import torch
-from rotation import sample_tilt_series_angles, rotate_2d
+from rotation import sample_tilt_series_angles, sample_uniform_angle, rotate_2d
 
 
 def project_1d(x: torch.Tensor) -> torch.Tensor:
@@ -74,3 +74,23 @@ def corruption_channel(x: torch.Tensor,
         thetas = sample_tilt_series_angles(x.size(0), num_tilts, tilt_increment_rad,
                                            device=x.device)
     return cryoet_channel(x, thetas, noise_std=noise_std)
+
+
+def build_pair_sample(corruption_channel, *, lift: bool):
+    """
+    `(x) -> (target, y)` for supervised.build_paired_dataset / scsi.estep.
+
+    y = corruption_channel(x), unchanged -- the channel still draws and discards its own random
+    tilt series. With lift=False, target = x (the default (x, F(x)) pairing). With lift=True,
+    target = x rotated by a FRESH independent Haar SO(2) angle, uncorrelated with the channel's
+    pose: the pair is (R.x, F(x)). That symmetrizes the training target over SO(2), so the
+    learned b_t(.|y) becomes rotation-invariant -- y fixes the digit, not its orientation, which
+    is all a pose-blind tilt series can identify anyway.
+    """
+    def pair_sample(x: torch.Tensor):
+        y = corruption_channel(x)
+        if not lift:
+            return x, y
+        theta = sample_uniform_angle(x.size(0), device=x.device)
+        return rotate_2d(x, theta), y
+    return pair_sample

@@ -22,7 +22,7 @@ from corruption import corruption_channel # black box forward model
 from data import build_observations, build_warmup, build_viz_pool
 from distribution import IsotropicGaussian
 from model import ConditionalDiT
-from scsi import EMA, estep, mstep_lifted
+from scsi import EMA, basic_pair, estep, mstep_lifted
 from args import parse_args, config_from_args
 from wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
 
@@ -86,12 +86,13 @@ if __name__ == "__main__":
         corruption_channel,
         noise_std=config.dataset.noise_std,
     )
+    pair_sample = basic_pair(corruption_channel_bound)  # (x̂) -> (x̂, F(x̂)); no pose to symmetrize
 
     # Run SCSI algorithm
     for k in range(config.scsi.num_scsi_steps):
         # E-step: Sample from the posterior distribution of latent variables given observations
         posterior_samples = estep(
-            model, base_dist, observations, corruption_channel_bound, config.scsi.estep
+            model, base_dist, observations, pair_sample, config.scsi.estep
         )
 
         # M-step: Update model parameters to maximize expected log-likelihood

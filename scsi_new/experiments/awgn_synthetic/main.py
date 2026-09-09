@@ -22,7 +22,7 @@ from corruption import corruption_channel  # black box forward model
 from data import build_observations, build_warmup, build_viz_pool, build_reference_pool, get_mode_centers
 from distribution import IsotropicGaussian
 from model import ConditionalVelocityMLP, POINT_DIM
-from scsi import EMA, estep, mstep_lifted
+from scsi import EMA, basic_pair, estep, mstep_lifted
 from args import parse_args, config_from_args
 from wandb_logging import log_distribution_scatter, log_distribution_metrics, log_trajectory_lines, random_draw
 
@@ -101,17 +101,18 @@ if __name__ == "__main__":
 
     # ŷ = F(x̂) must use the SAME channel params, yet still be random
     corruption_channel_bound = functools.partial(corruption_channel, noise_std=config.dataset.noise_std)
+    pair_sample = basic_pair(corruption_channel_bound)  # (x̂) -> (x̂, F(x̂)); no pose to symmetrize
 
     # No real E-step has run yet after warmup -- sample one ourselves (same call as the loop's
     # E-step below) purely to have a proposal pool to log at em_step=0.
-    warmup_posterior = estep(model, base_dist, observations, corruption_channel_bound, config.scsi.estep)
+    warmup_posterior = estep(model, base_dist, observations, pair_sample, config.scsi.estep)
     log_all_panels(em_step=0, x_hat_pool=warmup_posterior.tensors[0], warmup_ref=warmup_ref)
 
     # Run SCSI algorithm
     for k in range(config.scsi.num_scsi_steps):
         # E-step: sample from the posterior distribution of latent variables given observations
         posterior_samples = estep(
-            model, base_dist, observations, corruption_channel_bound, config.scsi.estep
+            model, base_dist, observations, pair_sample, config.scsi.estep
         )
 
         # M-step: update model parameters to maximize expected log-likelihood

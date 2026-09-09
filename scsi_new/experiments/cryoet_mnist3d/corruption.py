@@ -1,5 +1,5 @@
 import torch
-from rotation import sample_tilt_series_rotations_so3, rotate_3d
+from rotation import sample_tilt_series_rotations_so3, sample_uniform_rotation_so3, rotate_3d
 
 
 def project_2d(x: torch.Tensor) -> torch.Tensor:
@@ -68,3 +68,23 @@ def corruption_channel(x: torch.Tensor,
         rotations = sample_tilt_series_rotations_so3(x.size(0), num_tilts, tilt_increment_rad,
                                                     tilt_axis=tilt_axis, device=x.device)
     return cryoet_channel(x, rotations, noise_std=noise_std)
+
+
+def build_pair_sample(corruption_channel, *, lift: bool):
+    """
+    `(x) -> (target, y)` for supervised.build_paired_dataset / scsi.estep.
+
+    y = corruption_channel(x), unchanged -- the channel still draws and discards its own random
+    SO(3) mount + tilt series. With lift=False, target = x (the default (x, F(x)) pairing). With
+    lift=True, target = x rotated by a FRESH independent Haar SO(3) matrix, uncorrelated with the
+    channel's pose: the pair is (R.x, F(x)). That symmetrizes the training target over SO(3), so
+    the learned b_t(.|y) becomes rotation-invariant -- y fixes the shape, not its orientation,
+    which is all a pose-blind tilt series can identify anyway.
+    """
+    def pair_sample(x: torch.Tensor):
+        y = corruption_channel(x)
+        if not lift:
+            return x, y
+        R = sample_uniform_rotation_so3(x.size(0), device=x.device)
+        return rotate_3d(x, R), y
+    return pair_sample

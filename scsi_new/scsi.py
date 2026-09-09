@@ -47,14 +47,32 @@ class Config_SCSI:
     lr_eta_min: float = 0.0 # Floor LR for the global cosine schedule spanning warmup + all SCSI steps
 
 
-def estep(model, 
-          base_dist: Distribution, 
-          observations: Dataset, 
-          corruption_channel, 
+def basic_pair(corruption_channel):
+    """
+    Wrap a bound forward model F into the default `pair_sample(x) -> (target, y)` callable that
+    scsi.estep and supervised.build_paired_dataset both consume: identity target, y = F(x).
+
+    This is the no-op choice for channels with no pose to symmetrize over (AWGN, MRA). The CryoET
+    experiments pass their own builder instead, whose `--lift` variant returns (R.x, F(x)) for a
+    fresh independent Haar rotation R.
+    """
+    return lambda x: (x, corruption_channel(x))
+
+
+def estep(model,
+          base_dist: Distribution,
+          observations: Dataset,
+          pair_sample,
           config: Config_SCSI_EStep) -> Dataset:
     """
     E-step of the SCSI algorithm: Integrate the ODE to sample from the posterior distribution
     of the latent variables given the observations.
+
+    `pair_sample(x_hat) -> (target, y_hat)` turns each ODE proposal into an M-step training pair.
+    The default (scsi.basic_pair(F)) returns (x_hat, F(x_hat)). The CryoET experiments pass a
+    builder whose `--lift` variant returns (R.x_hat, F(x_hat)) for a fresh independent Haar
+    rotation R -- uncorrelated with F's own (discarded) pose -- so the M-step is taught that
+    orientation is free given y and EM never locks onto an arbitrary frame.
     """
     model.eval()
     device = next(model.parameters()).device
@@ -81,8 +99,8 @@ def estep(model,
             x0s = base_dist.sample(ys.size(0))
             x1s = euler_integration(model, x0s, ys, config.n_steps_sampling)
 
-            x1_batches.append(x1s)
-            ys_hat = corruption_channel(x1s)
+            target, ys_hat = pair_sample(x1s)
+            x1_batches.append(target)
             y_batches.append(ys_hat)
 
     x1s_all = torch.cat(x1_batches, dim=0)[:config.num_samples]

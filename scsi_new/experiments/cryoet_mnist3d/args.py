@@ -14,6 +14,9 @@ class Config:
     viz: Config_Viz
     block_out_channels: tuple[int, ...] = (64, 128, 256, 256)  # UNet3DConditionModel widths
     layers_per_block: int = 2
+    lift: bool = False          # E-step pairs (R.x_hat, F(x_hat)), R a fresh independent SO(3)
+                                # rotation (corruption.build_pair_sample). Default off: preserves
+                                # in-flight SCSI runs. main_supervised.py defaults this on.
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +57,13 @@ def parse_args() -> argparse.Namespace:
                          help="Fixed physical tilt axis, in grid-sample (W, H, D) order. "
                               "Default (0, 1, 0) = the H axis, perpendicular to the "
                               "projection (D) axis.")
+    channel.add_argument("--lift", dest="lift", action="store_true", default=False,
+                         help="Train the E-step / M-step on (R.x, F(x)) with R a fresh "
+                              "independent random SO(3) rotation, instead of the canonical "
+                              "(x, F(x)). Symmetrizes the target over the rotation group -- see "
+                              "corruption.build_pair_sample. Default: off (preserves in-flight runs).")
+    channel.add_argument("--no_lift", dest="lift", action="store_false",
+                         help="Canonical (x, F(x)) target (the default).")
 
     # --- Warmup pseudoinverse (classical weighted-backprojection warm start) ---
     warmup_recon = parser.add_argument_group("warmup pseudoinverse")
@@ -109,4 +119,4 @@ def config_from_args(args: argparse.Namespace) -> Config:
 
     return Config(dataset=dataset, warmup=warmup, scsi=scsi_config, viz=viz,
                   block_out_channels=tuple(args.block_out_channels),
-                  layers_per_block=args.layers_per_block)
+                  layers_per_block=args.layers_per_block, lift=args.lift)

@@ -16,7 +16,7 @@ import functools
 import torch
 import wandb
 
-from corruption import corruption_channel  # black box forward model
+from corruption import corruption_channel, build_pair_sample  # black box forward model
 from data import Config_Dataset_MNIST, load_mnist_volumes, build_viz_pool
 from distribution import IsotropicGaussian
 from model import build_velocity_model
@@ -84,8 +84,16 @@ def parse_args() -> argparse.Namespace:
                               "internally (cf. data._CHANNEL_BATCH).")
     channel.add_argument("--resample_channel", action="store_true",
                          help="Re-draw F(x) every epoch (fresh SO(3) mount + tilt series + "
-                              "noise) instead of freezing one realization per volume. Slow: the "
-                              "channel then runs per-sample inside the dataloader.")
+                              "noise; and, with --lift, the rotation R) instead of freezing one "
+                              "realization per volume. Slow: the channel then runs per-sample "
+                              "inside the dataloader.")
+    channel.add_argument("--lift", dest="lift", action="store_true", default=True,
+                         help="Train on (R.x, F(x)) with R a fresh independent random SO(3) "
+                              "rotation, symmetrizing the target over the rotation group so "
+                              "b_t(.|y) is rotation-invariant (corruption.build_pair_sample). "
+                              "Default: on.")
+    channel.add_argument("--no_lift", dest="lift", action="store_false",
+                         help="Use the canonical (x, F(x)) target (the old behavior).")
 
     # --- Model (mirrors experiments/cryoet_mnist3d/args.py, plus a DiT backbone option) ---
     model_grp = parser.add_argument_group("model")
@@ -193,6 +201,8 @@ if __name__ == "__main__":
         noise_std=args.noise_std,
         tilt_axis=config_dataset.tilt_axis,
     )
+    # (x) -> (target, F(x)). --lift (default) makes target = R·x for a fresh independent SO(3) R.
+    pair_sample = build_pair_sample(corruption_channel_bound, lift=args.lift)
 
     # Model & noise source
     model = build_velocity_model(
@@ -212,7 +222,7 @@ if __name__ == "__main__":
     # Supervised training set: {(x_i, F(x_i))} -- clean volumes paired with their tilt series.
     # load_mnist_volumes returns a raw (N, 1, V, V, V) tensor; build_paired_dataset wraps it.
     dataset = build_paired_dataset(
-        load_mnist_volumes(config_dataset), corruption_channel_bound,
+        load_mnist_volumes(config_dataset), pair_sample,
         batch_size=args.channel_batch_size,
     )
 
@@ -257,7 +267,7 @@ if __name__ == "__main__":
             checkpoint_dir=args.checkpoint_dir,
         ),
         on_log=log_all_panels,
-        resample_channel=corruption_channel_bound if args.resample_channel else None,
+        resample_pair_sample=pair_sample if args.resample_channel else None,
         checkpoint_meta={"args": vars(args)},
     )
 
