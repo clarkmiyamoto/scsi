@@ -55,7 +55,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
 from distribution import Distribution
-from scsi import Config_SCSI_MStep, EMA, mstep_lifted
+from scsi import Config_SCSI_MStep, EMA, ResampledPairs, mstep_lifted
 
 
 def autodetect_device() -> str:
@@ -123,34 +123,6 @@ def build_paired_dataset(x_source: torch.Tensor | Dataset,
         xs.append(t_batch)
         ys.append(y_batch)
     return TensorDataset(torch.cat(xs, dim=0), torch.cat(ys, dim=0))
-
-
-class _ResampledPairs(Dataset):
-    """
-    Wraps a clean-x dataset so (target, y) is re-drawn on every __getitem__ -- fresh channel
-    noise (and, for a lifting pair_sample, a fresh rotation R) each epoch instead of the single
-    frozen realization build_paired_dataset bakes in. Opt-in via
-    train_supervised(resample_pair_sample=pair_sample); the frozen-pool default is the literal
-    reading of the loss in this module's docstring, and matches how build_observations works.
-
-    Accepts a base whose items are (x, y) / (x,) tuples or bare x tensors -- only x is used.
-    pair_sample is applied per sample as pair_sample(x[None]) then squeezed, so it must tolerate
-    a batch dim of 1 (every experiment's corruption_channel does).
-    """
-
-    def __init__(self, base: Dataset,
-                 pair_sample: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]):
-        self.base = base
-        self.pair_sample = pair_sample
-
-    def __len__(self) -> int:
-        return len(self.base)
-
-    def __getitem__(self, idx: int):
-        item = self.base[idx]
-        x = item[0] if isinstance(item, (tuple, list)) else item
-        t, y = self.pair_sample(x.unsqueeze(0))
-        return t.squeeze(0), y.squeeze(0)
 
 
 def _training_plan(total: int, log_every: int,
@@ -260,7 +232,7 @@ def train_supervised(
         torch.manual_seed(config.seed)
 
     if resample_pair_sample is not None:
-        dataset = _ResampledPairs(dataset, resample_pair_sample)
+        dataset = ResampledPairs(dataset, resample_pair_sample)
     _check_dataset(dataset, base_dist)
 
     optimizer = AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)

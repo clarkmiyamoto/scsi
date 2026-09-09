@@ -16,12 +16,13 @@ import torch
 import wandb
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import TensorDataset
 
 from corruption import corruption_channel, build_pair_sample  # black box forward model
 from data import build_observations, build_warmup, build_viz_pool
 from distribution import IsotropicGaussian
 from model import ConditionalVelocityCryoET3D
-from scsi import EMA, estep, mstep_lifted
+from scsi import EMA, ResampledPairs, estep, mstep_lifted
 from args import parse_args, config_from_args
 from wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
 
@@ -75,19 +76,8 @@ if __name__ == "__main__":
                 config.viz.n_trajectory_rows, em_step, global_step[0], panel_name, device,
             )
 
-    # Warmup model on classical-reconstruction (x_hat, y) pairs: x_hat = pseudoinverse.py's
-    # filtered backprojection of the OBSERVED tilt series y, reused from build_observations (not
-    # a fresh MNIST-through-channel draw). The rotations aren't observed, so build_warmup
-    # resamples its own -- in 3D that leaves the warm start genuinely pose-blind and only
-    # roughly right (see data.build_warmup / pseudoinverse.py), a symmetry-breaking seed for EM.
-    warmup_pairs = build_warmup(observations, config.dataset)
-    mstep_lifted(
-        model, base_dist, warmup_pairs, optimizer, config.warmup,
-        scheduler=scheduler, ema=ema, global_step=global_step, log_prefix="warmup",
-    )
-    log_all_panels(em_step=0)
-
-    # ŷ = F(x̂) must use the SAME channel params, yet still draw a fresh random tilt series.
+    # ŷ = F(x̂) -- for the warm start below AND the E-step -- must use the SAME channel params as
+    # build_observations, yet still draw a fresh random SO(3) mount + tilt series on every call.
     corruption_channel_bound = functools.partial(
         corruption_channel,
         num_tilts=config.dataset.num_tilts,
@@ -97,6 +87,24 @@ if __name__ == "__main__":
     )
     # (x̂) -> (target, ŷ). --lift makes target = R·x̂ for a fresh independent random SO(3) R.
     pair_sample = build_pair_sample(corruption_channel_bound, lift=config.lift)
+
+    # Warm start on RESAMPLED (target, ŷ) pairs generated on the fly from the pseudoinverse
+    # recons X alone -- NOT build_warmup's frozen (x_hat, y_obs) pairs. X = pseudoinverse.py's
+    # filtered backprojection of the observed tilt series, renormed to [-1, 1] (build_warmup);
+    # we keep only that tensor and discard its paired y_obs. ResampledPairs then re-draws, per
+    # __getitem__, ŷ = F(X) through a fresh random mount + tilt series and (under --lift)
+    # target = R·X for a fresh independent SO(3) R -- the SAME pair_sample the E-step uses, so
+    # the warm start already trains on the rotation-symmetrized (R·X, F(X)) objective instead of
+    # one fixed (X, y_obs) draw. Cost: ResampledPairs runs the channel per-sample inside the
+    # dataloader (num_workers=0 in mstep_lifted), so warmup steps slow down -- same tradeoff as
+    # main_supervised.py's --resample_channel.
+    warmup_x = build_warmup(observations, config.dataset).tensors[0]
+    warmup_pairs = ResampledPairs(TensorDataset(warmup_x), pair_sample)
+    mstep_lifted(
+        model, base_dist, warmup_pairs, optimizer, config.warmup,
+        scheduler=scheduler, ema=ema, global_step=global_step, log_prefix="warmup",
+    )
+    log_all_panels(em_step=0)
 
     # Run SCSI algorithm
     for k in range(config.scsi.num_scsi_steps):

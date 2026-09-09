@@ -1,4 +1,5 @@
 import copy
+from collections.abc import Callable
 
 import torch
 import wandb
@@ -57,6 +58,34 @@ def basic_pair(corruption_channel):
     fresh independent Haar rotation R.
     """
     return lambda x: (x, corruption_channel(x))
+
+
+class ResampledPairs(Dataset):
+    """
+    Wraps a clean-x dataset so (target, y) is re-drawn on every __getitem__ -- fresh channel
+    noise (and, for a lifting pair_sample, a fresh rotation R) each epoch instead of a single
+    frozen realization. Consumers: supervised.train_supervised(resample_pair_sample=...) and
+    cryoet_mnist3d/main.py's resampled warm start (the pseudoinverse recons X paired on the fly
+    with (R.X, F(X)) so the warmup sees the same objective as the E-step).
+
+    Accepts a base whose items are (x, y) / (x,) tuples or bare x tensors -- only x is used.
+    pair_sample is applied per sample as pair_sample(x[None]) then squeezed, so it must tolerate
+    a batch dim of 1 (every experiment's corruption_channel does).
+    """
+
+    def __init__(self, base: Dataset,
+                 pair_sample: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]):
+        self.base = base
+        self.pair_sample = pair_sample
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, idx: int):
+        item = self.base[idx]
+        x = item[0] if isinstance(item, (tuple, list)) else item
+        t, y = self.pair_sample(x.unsqueeze(0))
+        return t.squeeze(0), y.squeeze(0)
 
 
 def estep(model,
