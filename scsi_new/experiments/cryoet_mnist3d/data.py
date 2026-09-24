@@ -21,6 +21,8 @@ pseudoinverse.py's docstring), so the 3D warm start is genuinely pose-blind and 
 right -- a symmetry-breaking seed for EM, not an upper bound.
 """
 
+import math
+import warnings
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -39,6 +41,13 @@ from pseudoinverse import pseudoinverse
 
 VOL_SIZE = 32
 
+# Default digit geometry as a fraction of vol_size, BEFORE Config_Dataset_MNIST.digit_scale is
+# applied: the in-plane footprint the digit is resized into and the depth band it is extruded
+# across. Sized so a generic SO(3) mount doesn't clip the digit against the cube corners
+# (load_mnist_volumes docstring); checked by mass-invariance in __main__, not proven.
+_INPLANE_FRAC = 0.65
+_DEPTH_FRAC = 0.25
+
 # corruption_channel expands each volume to (B*num_tilts, 1, D, H, W) internally for one
 # grid_sample, so the channel is applied in small chunks rather than over the whole pool at once.
 _CHANNEL_BATCH = 32
@@ -49,8 +58,12 @@ class Config_Dataset_MNIST:
     # Dataset
     n_images_per_class: int = 23_000     # per-digit draw from EMNIST "digits" (24k train / 4k test per class)
     vol_size: int = VOL_SIZE
-    inplane_size: int | None = None      # digit load resolution; default round(vol_size * 0.65)
-    depth_extent: int | None = None      # depth band the digit is extruded across; default round(vol_size * 0.25)
+    digit_scale: float = 1.0             # isotropic size multiplier for the extruded digit: scales
+                                        # BOTH the in-plane footprint and the depth band. >1
+                                        # widens/thickens the shape, <1 shrinks it. Ignored on
+                                        # whichever axis has an explicit *_size / *_extent below.
+    inplane_size: int | None = None      # digit load resolution; default round(vol_size * 0.65 * digit_scale)
+    depth_extent: int | None = None      # depth band the digit is extruded across; default round(vol_size * 0.25 * digit_scale)
     digit_classes: list[int] | None = None  # e.g. [3, 7]. None -> all 10 digits.
 
     # Corruption channel
@@ -74,7 +87,8 @@ class Config_Dataset_MNIST:
 _EMNIST_DEORIENT = transforms.Lambda(lambda img: img.transpose(Image.Transpose.TRANSPOSE))
 
 
-def _load_mnist_digits(config: Config_Dataset_MNIST, image_size: int) -> torch.Tensor:
+def _load_mnist_digits(config: Config_Dataset_MNIST,
+                       image_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """
     n_images_per_class random EMNIST digits ("digits" split) from EACH class in digit_classes,
     de-transposed to MNIST orientation, resized to `image_size`, normalized to [-1, 1],
@@ -85,7 +99,7 @@ def _load_mnist_digits(config: Config_Dataset_MNIST, image_size: int) -> torch.T
     whatever the split holds.
 
     Returns:
-        (N, 1, image_size, image_size)
+        (N, 1, image_size, image_size) digits and their (N,) class labels
     """
     digit_classes = config.digit_classes if config.digit_classes is not None else list(range(10))
 
@@ -99,34 +113,70 @@ def _load_mnist_digits(config: Config_Dataset_MNIST, image_size: int) -> torch.T
                               transform=transform)
     generator = torch.Generator().manual_seed(config.seed) if config.seed is not None else None
 
-    chunks = []
+    chunks, label_chunks = [], []
     for digit_class in digit_classes:
         class_idx = (dataset.targets == digit_class).nonzero(as_tuple=True)[0]
         loader = DataLoader(Subset(dataset, class_idx), batch_size=config.n_images_per_class,
                             shuffle=True, generator=generator)
-        x_c, _ = next(iter(loader))
+        x_c, label_c = next(iter(loader))
         chunks.append(x_c)
-    return torch.cat(chunks, dim=0)
+        label_chunks.append(label_c)
+    return torch.cat(chunks, dim=0), torch.cat(label_chunks, dim=0)
 
 
-def load_mnist_volumes(config: Config_Dataset_MNIST) -> torch.Tensor:
+def _digit_geometry(config: Config_Dataset_MNIST) -> tuple[int, int]:
+    """Resolve (inplane, depth) in voxels for load_mnist_volumes: the digit's in-plane footprint
+    and its extruded depth band. Each defaults to _INPLANE_FRAC / _DEPTH_FRAC of vol_size scaled
+    by config.digit_scale; config.inplane_size / config.depth_extent override that axis outright.
+
+    Raises if either falls outside [1, vol_size] -- F.pad would silently crop (inplane > V) and
+    the depth slice would misalign (depth > V). Warns, without blocking, when digit_scale grows
+    the digit box far enough that a generic SO(3) mount could clip it against the cube corners
+    (load_mnist_volumes docstring): the box half-diagonal is a conservative stand-in for the ink
+    half-diagonal there.
+    """
+    V = config.vol_size
+    inplane = (config.inplane_size if config.inplane_size is not None
+               else round(V * _INPLANE_FRAC * config.digit_scale))
+    depth = (config.depth_extent if config.depth_extent is not None
+             else round(V * _DEPTH_FRAC * config.digit_scale))
+    if not (1 <= inplane <= V and 1 <= depth <= V):
+        raise ValueError(
+            f"digit geometry (inplane={inplane}, depth={depth}) outside [1, vol_size={V}]: "
+            f"lower digit_scale (={config.digit_scale}), or set inplane_size / depth_extent "
+            f"explicitly."
+        )
+    if math.hypot(inplane / 2, depth / 2) > V / 2:
+        warnings.warn(
+            f"digit box half-diagonal {math.hypot(inplane / 2, depth / 2):.1f} exceeds "
+            f"vol_size/2 ({V / 2:.1f}) at digit_scale={config.digit_scale} "
+            f"(inplane={inplane}, depth={depth}): a generic SO(3) mount may clip the digit "
+            f"against the cube corners and corrupt the forward model (see load_mnist_volumes "
+            f"docstring). Check the __main__ mass invariance, or reduce digit_scale.",
+            stacklevel=2,
+        )
+    return inplane, depth
+
+
+def load_mnist_volumes(config: Config_Dataset_MNIST, return_labels: bool = False):
     """
     Extrude each 2D MNIST digit uniformly across a central depth band, leaving empty (-1) space
     at the boundary of ALL THREE axes so a generic SO(3) rotation doesn't clip the object
     against the cube's corners -- a 90-degree rotation swaps depth extent into in-plane extent,
     so depth-only margin is not enough on its own. Binding constraint: for in-plane ink radius
     r_xy and half-depth extent d, need sqrt(r_xy^2 + d^2) <= vol_size/2 - eps. The
-    inplane_size / depth_extent defaults are a starting point for that, checked by
-    mass-invariance under rotation (see __main__), not proven.
+    inplane_size / depth_extent defaults (config.digit_scale times _INPLANE_FRAC / _DEPTH_FRAC
+    of vol_size) are a starting point for that, checked by mass-invariance under rotation (see
+    __main__), not proven; _digit_geometry warns once digit_scale pushes the digit box past it.
 
     Returns:
-        (N, 1, vol_size, vol_size, vol_size) in [-1, 1], background -1.
+        (N, 1, vol_size, vol_size, vol_size) in [-1, 1], background -1. With return_labels, also
+        the (N,) digit labels -- contiguous per class, in digit_classes order.
     """
     V = config.vol_size
-    inplane = config.inplane_size if config.inplane_size is not None else round(V * 0.65)
-    depth = config.depth_extent if config.depth_extent is not None else round(V * 0.25)
+    inplane, depth = _digit_geometry(config)
 
-    x2d = _load_mnist_digits(config, image_size=inplane)          # (N, 1, s, s)
+    x2d, labels = _load_mnist_digits(config, image_size=inplane)  # (N, 1, s, s), (N,)
     N = x2d.size(0)
 
     pad = V - inplane
@@ -136,7 +186,7 @@ def load_mnist_volumes(config: Config_Dataset_MNIST) -> torch.Tensor:
     margin = (V - depth) // 2
     vol = torch.full((N, 1, V, V, V), -1.0, dtype=x2d.dtype)
     vol[:, :, margin:margin + depth] = x2d.unsqueeze(2).expand(-1, -1, depth, -1, -1)
-    return vol
+    return (vol, labels) if return_labels else vol
 
 
 def build_observations(config: Config_Dataset_MNIST) -> Dataset:
@@ -217,6 +267,26 @@ def build_warmup(observations: Dataset, config: Config_Dataset_MNIST) -> Dataset
     return TensorDataset(torch.cat(xhat_chunks, dim=0), y_all)
 
 
+def _class_balanced_indices(labels: torch.Tensor, n_pool: int) -> torch.Tensor:
+    """
+    n_pool indices into a class-contiguous pool: an even share of n_pool per class (the first
+    n_pool % K classes get one extra), evenly spaced through that class's block, then
+    interleaved round-robin (c0, c1, ..., c0, c1, ...). A plain linspace over the whole pool
+    would put all of the first panel's items in the first few classes. With one class this
+    is exactly linspace(0, N - 1, n_pool), the pre-multiclass selection.
+    """
+    classes = labels.unique_consecutive()
+    K = classes.numel()
+    per_class = []
+    for i, c in enumerate(classes.tolist()):
+        block = (labels == c).nonzero(as_tuple=True)[0]
+        m = n_pool // K + (1 if i < n_pool % K else 0)
+        per_class.append(block[torch.linspace(0, block.numel() - 1, m).round().long()])
+    # Round-robin: rank 0 of every class, then rank 1, ...
+    return torch.stack([idx[r] for r in range(per_class[0].numel())
+                        for idx in per_class if r < idx.numel()])
+
+
 def build_viz_pool(config: Config_Dataset_MNIST, n_pool: int, viz_seed: int) -> dict:
     """
     Small diagnostic pool for wandb viz: n_pool volumes at deterministic positions in the SAME
@@ -224,12 +294,17 @@ def build_viz_pool(config: Config_Dataset_MNIST, n_pool: int, viz_seed: int) -> 
     viz_seed (comparable across sweeps). Runs on CPU with the RNG state saved/restored, so it has
     no effect on the rest of the run's RNG stream.
 
+    Multi-class pools are class-balanced and interleaved (_class_balanced_indices), so the
+    first n_display items -- the "fixed" panel -- cycle through the classes. Single-class pools
+    are unchanged.
+
     Returns a dict with `rotations` (B, num_tilts, 3, 3) -- the 3D analogue of the 2D pool's
-    scalar `theta` -- named to match corruption_channel's kwarg.
+    scalar `theta` -- named to match corruption_channel's kwarg, and `label` (B,), the digit
+    class of each item (eval_metrics pairs items by it).
     """
-    vol_gt = load_mnist_volumes(config)
-    idx = torch.linspace(0, vol_gt.size(0) - 1, n_pool).round().long()
-    x_gt = vol_gt[idx]
+    vol_gt, labels = load_mnist_volumes(config, return_labels=True)
+    idx = _class_balanced_indices(labels, n_pool)
+    x_gt, label = vol_gt[idx], labels[idx]
 
     rng_state = torch.get_rng_state()
     torch.manual_seed(viz_seed)
@@ -241,7 +316,7 @@ def build_viz_pool(config: Config_Dataset_MNIST, n_pool: int, viz_seed: int) -> 
     y = corruption_channel(x_gt, rotations=rotations, noise_std=config.noise_std)
     torch.set_rng_state(rng_state)
 
-    return {"x_gt": x_gt, "x0": x0, "rotations": rotations, "y": y}
+    return {"x_gt": x_gt, "x0": x0, "rotations": rotations, "y": y, "label": label}
 
 
 if __name__ == "__main__":
@@ -265,6 +340,10 @@ if __name__ == "__main__":
     parser.add_argument("--digit_classes", type=int, nargs="+", default=None)
     parser.add_argument("--n_images_per_class", type=int, default=2)
     parser.add_argument("--vol_size", type=int, default=32)
+    parser.add_argument("--digit_scale", type=float, default=1.0,
+                        help="Isotropic size multiplier for the extruded digit (scales both the "
+                             "in-plane footprint and the depth band). --inplane_size / "
+                             "--depth_extent override it per axis.")
     parser.add_argument("--inplane_size", type=int, default=None)
     parser.add_argument("--depth_extent", type=int, default=None)
     parser.add_argument("--num_tilts", type=int, default=16)
@@ -288,6 +367,7 @@ if __name__ == "__main__":
 
     config = Config_Dataset_MNIST(
         n_images_per_class=args.n_images_per_class, vol_size=args.vol_size,
+        digit_scale=args.digit_scale,
         inplane_size=args.inplane_size, depth_extent=args.depth_extent,
         digit_classes=args.digit_classes, num_tilts=args.num_tilts,
         tilt_increment_deg=args.tilt_increment_deg, noise_std=args.noise_std,
@@ -307,10 +387,10 @@ if __name__ == "__main__":
     probe = vol_gt[:min(16, N)]
     ink0 = (probe + 1.0).sum().item()
     ink_rot = (rotate_3d(probe, sample_uniform_rotation_so3(probe.size(0))) + 1.0).sum().item()
+    inplane_px, depth_px = _digit_geometry(config)
     print(f"load_mnist_volumes mass check: ink {ink0:.0f} -> {ink_rot:.0f} after SO(3) "
           f"({100 * (ink_rot - ink0) / ink0:+.1f}%);  V={V} "
-          f"inplane={config.inplane_size or round(V * 0.65)} "
-          f"depth={config.depth_extent or round(V * 0.25)}")
+          f"inplane={inplane_px} depth={depth_px} (digit_scale={config.digit_scale})")
     # Warmup lands on [-1, 1] by construction (_renorm_unit); the informative check is whether
     # the background actually sits at -1 -- a corner voxel should, for both x_hat and GT.
     print(f"build_warmup vs GT  |  x_hat min/mean/max "

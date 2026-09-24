@@ -59,6 +59,42 @@ profile). If you OOM:
   (`euler_integration` is `@torch.no_grad()` and updates in place, so this is time, not memory.)
 - `--estep_num_samples 1000` — fewer posterior samples per M-step dataset.
 
+## LR schedule, EMA, checkpoints, eval
+
+The default LR schedule is one cosine over warmup + all EM steps, so `--num_scsi_steps` also
+sets the LR every EM step runs at. A 50-step run spends its first 20 EM steps above 1.7e-4,
+where the 12-step run has annealed out by EM 12 (`sbatch/lr_schedule_ablation/README.md`).
+These flags are all opt-in, and the defaults reproduce the original runs:
+
+- `--lr_schedule {cosine,constant,cosine_per_mstep}` and `--lr_horizon_scsi_steps K`: the
+  cosine reaches `--eta_min` at EM step K and then **holds** there, unlike
+  `CosineAnnealingLR`, which climbs back up past `T_max`.
+- `--sample_with_ema`: the E-step and panels use the EMA weights, which were otherwise tracked
+  but never used.
+- `--save_warmup_ckpt PATH` / `--load_warmup_ckpt PATH`: train the warm start once and share it
+  across runs. The load refuses a checkpoint with different dataset / model args.
+  `--em_seed` reseeds after it.
+- `--ckpt_dir DIR`: rolling `latest.pt` every EM step. Add `--resume` to continue from it
+  (same wandb run) when it exists: chain the same SBATCH file with `--dependency=afterany` to
+  run past the 48h walltime.
+- `eval/{raw,ema}/corr_own|corr_other|corr_gap`: rotation-searched correlation vs GT, logged
+  every EM step (`eval_metrics.py`). `corr_gap` is 0 for any y-independent (collapsed) output.
+  Multi-class runs also log `corr_gap_xcls` (vs a different digit) and `by_class/<d>/...`.
+  Keep `--eval_n` at least 2x the number of classes. `--eval_n 0` turns it off.
+
+All ten digits: `sbatch/tenclass_sweep/README.md`.
+
+## Digit width
+
+`--digit_scale S` (default `1.0`) isotropically scales the extruded digit inside the cube:
+in-plane footprint `round(vol_size * 0.65 * S)`, depth band `round(vol_size * 0.25 * S)`.
+`>1` widens/thickens, `<1` shrinks. `--inplane_size` / `--depth_extent` still override either
+axis with an absolute voxel count. Large `S` makes the digit clip the cube corners under the
+SO(3) mount (`data._digit_geometry` warns, then `ValueError` past `vol_size`) — check the
+mass-invariance line the geometry viewer prints before committing to a value. wandb point-cloud
+panels size their voxel budget from the GT ink count, so they follow `--digit_scale` with no
+extra flag.
+
 ## Quick data / geometry check
 
 ```bash
@@ -67,5 +103,7 @@ uv run python data.py --n_images_per_class 2 --num_tilts 16   # interactive 3D w
                                                              #  linked isosurfaces) + SO(3) mass check
                                                              #  --level tunes the isosurface; --save
                                                              #  PATH / --no_show for headless
+uv run python data.py --n_images_per_class 2 --digit_scale 1.4   # same viewer at a wider digit;
+                                                             #  read the printed mass-check % first
 uv run python pseudoinverse.py --n_images_per_class 2         # known-pose WBP smoke test + Pearson r
 ```

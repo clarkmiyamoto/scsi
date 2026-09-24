@@ -2,17 +2,28 @@ import torch
 import torch.nn.functional as F
 
 
-def sample_uniform_rotation_so3(B: int, device: torch.device | None = None) -> torch.Tensor:
+def sample_uniform_rotation_so3(B: int, device: torch.device | None = None,
+                                generator: torch.Generator | None = None) -> torch.Tensor:
     """
     Haar-uniform rotation on SO(3), as a (B, 3, 3) matrix -- the 3D analogue of
     rotation.sample_uniform_angle, drawn the same "literal z ~ N(0,1)" way: a unit quaternion
     from a normalized 4D isotropic Gaussian is exactly uniform on S^3, which pushes forward to
     the Haar measure on SO(3).
 
+    `generator` (optional) draws from a private RNG stream instead of the global one -- used by
+    eval_metrics so the metric never perturbs training. It must live on `device`.
+
     Returns:
         R: (B, 3, 3)
     """
-    q = torch.randn(B, 4, device=device)
+    q = torch.randn(B, 4, device=device, generator=generator)
+    return quaternion_to_matrix(q)
+
+
+def quaternion_to_matrix(q: torch.Tensor) -> torch.Tensor:
+    """
+    (..., 4) quaternion (w, x, y, z), normalized internally -> (..., 3, 3) rotation matrix.
+    """
     q = q / q.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     w, x, y, z = q.unbind(dim=-1)
     return torch.stack([

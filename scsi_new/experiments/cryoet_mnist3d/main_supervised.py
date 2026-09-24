@@ -58,10 +58,15 @@ def parse_args() -> argparse.Namespace:
                               "class). 23k/class = 230k volumes -- ~30 GB pool, plus the paired "
                               "y tensor. Lower this for anything but a cluster run.")
     dataset.add_argument("--vol_size", type=int, default=32, help="Must match model.VOL_SIZE (32).")
+    dataset.add_argument("--digit_scale", type=float, default=1.0,
+                         help="Isotropic size multiplier for the extruded digit (scales both "
+                              "the in-plane footprint and the depth band). --inplane_size / "
+                              "--depth_extent override the corresponding axis.")
     dataset.add_argument("--inplane_size", type=int, default=None,
-                         help="Digit load resolution; default round(vol_size * 0.65).")
+                         help="Digit load resolution; default round(vol_size * 0.65 * digit_scale).")
     dataset.add_argument("--depth_extent", type=int, default=None,
-                         help="Depth band the digit is extruded across; default round(vol_size * 0.25).")
+                         help="Depth band the digit is extruded across; default "
+                              "round(vol_size * 0.25 * digit_scale).")
     dataset.add_argument("--digit_classes", type=int, nargs="+", default=None,
                          help="e.g. --digit_classes 3 7. Default: all 10 digits.")
     dataset.add_argument("--seed", type=int, default=42,
@@ -169,6 +174,7 @@ def build_dataset_config(args: argparse.Namespace) -> Config_Dataset_MNIST:
     return Config_Dataset_MNIST(
         n_images_per_class=args.n_images_per_class,
         vol_size=args.vol_size,
+        digit_scale=args.digit_scale,
         inplane_size=args.inplane_size,
         depth_extent=args.depth_extent,
         digit_classes=args.digit_classes,

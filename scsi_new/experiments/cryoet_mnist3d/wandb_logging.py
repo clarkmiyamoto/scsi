@@ -41,23 +41,28 @@ _GT_RGB = (76, 114, 176)     # "#4c72b0"
 _HAT_RGB = (196, 78, 82)     # "#c44e52"
 
 
-def _volume_to_points(vol: torch.Tensor, frac: float) -> torch.Tensor:
-    """(D, H, W) volume -> (P, 6) [x=W, y=H, z=D, r, g, b] for the `frac`-brightest
-    voxels, recentred on the volume midpoint (colour left as zeros for the caller).
+def _volume_to_points(vol: torch.Tensor, k: int) -> torch.Tensor:
+    """(D, H, W) volume -> (P, 6) [x=W, y=H, z=D, r, g, b] for the `k` brightest voxels,
+    recentred on the volume midpoint (colour left as zeros for the caller).
 
-    An exact value *budget* -- P = round(frac * D*H*W) voxels via topk, identical for
-    every cloud -- rather than a threshold. `vol > c` breaks both ways here: the ODE's
-    x_hat is unclamped and need not sit near [-1, 1] (a fixed c can select ~0 or ~all of
-    it), and the near-binary GT collapses to an empty set whenever its ink fraction
-    exceeds `frac` (every ink voxel ties at the max). topk is bounded away from 0 and
-    D*H*W by construction and uses no RNG. Equal budget for GT and x_hat makes the panel
-    a comparison of geometry, not intensity (the image panel already carries intensity).
-    The midpoint offset is a fixed affine shift applied identically to every volume; it
-    is deliberately NOT a per-cloud centroid, which would slide a displaced x_hat back
-    onto GT and hide the error.
+    A fixed voxel *budget* -- the same k for every cloud, chosen once by the caller from the GT
+    ink count -- applied by topk, never a threshold. `vol > c` breaks both ways here: the ODE's
+    x_hat is unclamped and need not sit near [-1, 1] (a fixed c can select ~0 or ~all of it),
+    and the near-binary GT collapses to an empty set whenever its ink fraction exceeds `c`
+    (every ink voxel ties at the max). topk is bounded away from 0 and D*H*W by construction and
+    uses no RNG. Equal budget for GT and x_hat makes the panel a comparison of geometry, not
+    intensity (the image panel already carries intensity).
+
+    The caller sizes k from GT precisely *because* GT is thresholdable -- near-binary, with
+    background pinned at -1 -- so (x_gt > 0).sum() is its true ink-voxel count at any
+    data.digit_scale / inplane_size / depth_extent; x_hat, which is not thresholdable, then has
+    that same k imposed on it. Sizing x_hat's budget from x_hat's own statistics would be
+    per-cloud normalisation through the back door -- the same move as a per-cloud centroid,
+    which would slide a displaced x_hat back onto GT and hide the error. The midpoint offset
+    below is by contrast a fixed affine shift applied identically to every volume.
     """
     v = vol.detach().float().cpu()
-    k = min(v.numel(), max(1, round(frac * v.numel())))
+    k = min(v.numel(), max(1, k))
     idx = torch.topk(v.flatten(), k, sorted=False).indices
     occ = torch.stack(torch.unravel_index(idx, v.shape), dim=1).float()   # (P, 3) (d, h, w)
     center = (torch.tensor(v.shape, dtype=torch.float32) - 1.0) / 2.0
@@ -67,7 +72,7 @@ def _volume_to_points(vol: torch.Tensor, frac: float) -> torch.Tensor:
 
 
 @torch.no_grad()
-def log_reconstruction_pointcloud(x_gt, x_hat, em_step, wandb_step, panel_name, frac=0.05):
+def log_reconstruction_pointcloud(x_gt, x_hat, em_step, wandb_step, panel_name, frac=None):
     """Interactive 3D point-cloud twin of viz/{panel_name}/reconstruction.
 
     One rotatable wandb.Object3D scene per call: for each display example, the GT volume
@@ -77,17 +82,32 @@ def log_reconstruction_pointcloud(x_gt, x_hat, em_step, wandb_step, panel_name, 
     log_reconstruction_grid already integrated (no second ODE solve). Only the volumes
     become point clouds; y / F(x_hat) are 2D tilts and stay in the image panel.
 
+    Voxel budget: by default every cloud keeps round(mean over the batch of (x_gt > 0) *
+    voxels-per-volume) points -- the GT batch's own ink-voxel count -- so the panel tracks the
+    digit's actual size at any data.digit_scale / inplane_size / depth_extent without a dataset
+    config plumbed in here. Pass `frac` to force a fixed fraction of the volume instead (the
+    prior fixed behaviour was frac=0.05). Either way it is one number for the whole call,
+    applied to GT and x_hat alike (see _volume_to_points).
+
     Uses no RNG (the budget is topk, not a random subsample) so it cannot perturb the
     training stream.
     """
     n, V = x_gt.size(0), x_gt.size(-1)
+    per_vol = x_gt[0, 0].numel()
+    if frac is not None:
+        k = max(1, round(frac * per_vol))
+        budget_desc = f"top {frac:.0%} of voxels"
+    else:
+        ink_frac = (x_gt > 0).float().mean().item()
+        k = max(1, round(ink_frac * per_vol))
+        budget_desc = f"top {k} voxels (GT ink {ink_frac:.1%})"
     gap = V * 1.6
     n_cols = max(1, math.ceil(math.sqrt(n)))
     clouds = []
     for j in range(n):
         pairs = ((x_gt[j, 0], _GT_RGB), (x_hat[j, 0], _HAT_RGB))
         for row, (vol, rgb) in enumerate(pairs):
-            pc = _volume_to_points(vol, frac)
+            pc = _volume_to_points(vol, k)
             if pc.size(0) == 0:
                 continue
             pc[:, 0] += (j % n_cols) * gap     # examples across x ...
@@ -99,7 +119,7 @@ def log_reconstruction_pointcloud(x_gt, x_hat, em_step, wandb_step, panel_name, 
         return
     arr = torch.cat(clouds, dim=0).numpy()
     caption = (f"{panel_name} | EM step {em_step} | each cell: GT (blue) then x_hat "
-               f"(red, +z) | top {frac:.0%} of voxels")
+               f"(red, +z) | {budget_desc}")
     wandb.log({f"viz/{panel_name}/reconstruction_pc": wandb.Object3D(arr, caption=caption),
                "em/step": em_step},
               step=wandb_step)
