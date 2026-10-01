@@ -1,0 +1,33 @@
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /mnt/home/cmiyamoto/.netrc.
+wandb: Currently logged in as: clarkmiyamoto (clarkmiyamoto-new-york-university) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.26.1
+wandb: Run data is saved locally in /mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_mnist/wandb/run-20261001_005347-l0xb2sdy
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run lr1e-3_w40k_m5k
+wandb: ⭐️ View project at https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep
+wandb: 🚀 View run at https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep/runs/l0xb2sdy
+wandb: updating run metadata
+wandb: uploading history steps 239706-240000, summary
+wandb: 
+wandb: Run history:
+wandb:          em/step ▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃▄▄▄▄▄▅▅▅▅▅▅▆▆▆▆▆▆▇▇▇▇▇▇██
+wandb:  train/grad_norm ▂▃▃▂▂▂▂▃█▂▂▁▁▄▂▃▂▃▂▂▂▁▁▆▃▁▂▂▁▄▂▃▁▁▃▃▄▃▃▁
+wandb:       train/loss ▂▂▃▄▃▂▃▄▃▂▄▂█▄▃▄▁▁▃▂▁▂▂▁▁▁▁▂▁▁▁▂▂▃▁▂▂▁▁▄
+wandb:         train/lr ▆▂▇█▁▄▂▇▄▃▇▆▁▄▃▅█▂█▇▇▅▆▅▇▁▁▆▄█▇█▅▄▄▆▅▅█▂
+wandb: warmup/grad_norm ▁▁▅▄▆▆▅▅▆▃▄▄▅▄▅▃▆▆▇▄▄▄▄▆▄▃▄▄▅▄▄▄█▄▃▃▃▃▂▃
+wandb:      warmup/loss █▃▃▃▂▂▂▂▂▂▂▂▂▂▂▂▁▂▂▂▁▁▁▁▂▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:        warmup/lr ███████▇▇▇▇▇▇▆▆▅▅▅▅▄▃▃▃▃▃▃▂▂▂▂▁▁▁▁▁▁▁▁▁▁
+wandb: 
+wandb: Run summary:
+wandb:          em/step 40
+wandb:  train/grad_norm 2.57911
+wandb:       train/loss 0.173
+wandb:         train/lr 1e-05
+wandb: warmup/grad_norm 1.70373
+wandb:      warmup/loss 0.22643
+wandb:        warmup/lr 1e-05
+wandb: 
+wandb: 🚀 View run lr1e-3_w40k_m5k at: https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep/runs/l0xb2sdy
+wandb: ⭐️ View project at: https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep
+wandb: Synced 4 W&B file(s), 164 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20261001_005347-l0xb2sdy/logs

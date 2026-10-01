@@ -36,20 +36,35 @@ if __name__ == "__main__":
     torch.manual_seed(config.scsi.seed)
     device = torch.device(config.scsi.device)
 
+    def build_model():
+        return ConditionalVelocityCryoET(
+            image_size=config.dataset.image_size, arch=config.arch, patch_size=config.patch_size,
+        ).to(device)
+
+    def build_optimizer(net, train_config, n_steps):
+        # AdamW + cosine from train_config.lr down to lr_eta_min over n_steps.
+        optimizer = AdamW(net.parameters(),
+                          lr=train_config.lr,
+                          weight_decay=train_config.weight_decay)
+        scheduler = CosineAnnealingLR(optimizer, T_max=n_steps, eta_min=config.scsi.lr_eta_min)
+        return optimizer, scheduler
+
     # Model & optimizer
-    model = ConditionalVelocityCryoET(
-        image_size=config.dataset.image_size, arch=config.arch, patch_size=config.patch_size,
-    ).to(device)
+    model = build_model()
     base_dist = IsotropicGaussian(
         shape=(1, config.dataset.image_size, config.dataset.image_size), device=device,
     )
-    optimizer = AdamW(model.parameters(),
-                        lr=config.scsi.mstep.lr,
-                        weight_decay=config.scsi.mstep.weight_decay)
-
-    total_train_steps = config.warmup.n_steps_train + config.scsi.num_scsi_steps * config.scsi.mstep.n_steps_train
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_train_steps, eta_min=config.scsi.lr_eta_min)
-    ema = EMA(model, decay=config.scsi.mstep.ema)
+    if config.student_init == "fresh":
+        # Every model trains on its own schedule: the warmup gets --warmup_lr and a cosine over
+        # just the warmup steps, so warmup and M-step settings don't leak into each other.
+        optimizer, scheduler = build_optimizer(model, config.warmup, config.warmup.n_steps_train)
+        ema = EMA(model, decay=config.warmup.ema)
+    else:
+        # One optimizer at --mstep_lr and one cosine spanning warmup + every M-step
+        # (--warmup_lr / --warmup_weight_decay / --warmup_ema are unused in this mode).
+        total_train_steps = config.warmup.n_steps_train + config.scsi.num_scsi_steps * config.scsi.mstep.n_steps_train
+        optimizer, scheduler = build_optimizer(model, config.scsi.mstep, total_train_steps)
+        ema = EMA(model, decay=config.scsi.mstep.ema)
 
     # Load observations from MNIST dataset
     observations = build_observations(config.dataset)
@@ -97,6 +112,14 @@ if __name__ == "__main__":
         posterior_samples = estep(
             model, base_dist, observations, pair_sample, config.scsi.estep
         )
+
+        # --student_init fresh: the teacher's only job was the E-step above. Discard it and train
+        # a newly initialized student (new optimizer, EMA, and cosine LR restarted over this M-step)
+        # instead of fine-tuning the teacher in place.
+        if config.student_init == "fresh":
+            model = build_model()
+            optimizer, scheduler = build_optimizer(model, config.scsi.mstep, config.scsi.mstep.n_steps_train)
+            ema = EMA(model, decay=config.scsi.mstep.ema)
 
         # M-step: Update model parameters to maximize expected log-likelihood
         mstep_lifted(

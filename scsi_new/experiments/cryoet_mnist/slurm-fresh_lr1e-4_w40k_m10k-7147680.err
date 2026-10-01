@@ -1,0 +1,33 @@
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /mnt/home/cmiyamoto/.netrc.
+wandb: Currently logged in as: clarkmiyamoto (clarkmiyamoto-new-york-university) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.26.1
+wandb: Run data is saved locally in /mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_mnist/wandb/run-20261001_021202-z880tbbl
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run lr1e-4_w40k_m10k
+wandb: ⭐️ View project at https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep
+wandb: 🚀 View run at https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep/runs/z880tbbl
+wandb: updating run metadata
+wandb: uploading media/images/viz/fixed/trajectory_440000_832437c9aef543eeb4e0.png; uploading media/images/viz/random/reconstruction_440000_ee6572fde0fa39f89bdb.png; uploading media/images/viz/random/trajectory_440000_6d428a4b430e5f500a21.png; uploading wandb-summary.json; uploading config.yaml (+ 1 more)
+wandb: 
+wandb: Run history:
+wandb:          em/step ▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃▄▄▄▄▄▅▅▅▅▅▅▆▆▆▆▆▆▇▇▇▇▇▇██
+wandb:  train/grad_norm ▃▃▂▂▂▂▁▂▂▂▂▂▆▂▂▂▂▁▂▁▂▇▁█▁▃▂▂▁▁▁▄▃▃▂▂▂▁▁▁
+wandb:       train/loss ▁▂▂▂▂▂▂▂▂▂▂▂▂▃▂▂▂▂▂▁▁▁▂▂▁▁▂▁█▃▁▁█▁▁▁▁▁▁▁
+wandb:         train/lr ▇▁█▁▁███▇▂▆▁▇▃█▅█▂▁▁▇▁▁▅█▇▅▁▆▃█▆▁▇▅▁▄▆▁▃
+wandb: warmup/grad_norm █▅▅▅▇▇▆▆▆▅█▆▆▇▇▅▇▇▆▄▆▆▇▅█▄▄▅▄▄▃▁▄▂▅▂▂▂▂▁
+wandb:      warmup/loss ▇█▆▆▄▄▄▄▄▄▃▃▃▃▃▂▃▂▂▂▂▃▂▂▂▂▁▂▁▂▂▁▁▂▂▂▂▁▁▁
+wandb:        warmup/lr ████████▇▇▇▇▇▇▆▆▆▆▆▅▄▄▃▃▃▃▃▃▃▂▂▂▂▂▂▁▁▁▁▁
+wandb: 
+wandb: Run summary:
+wandb:          em/step 40
+wandb:  train/grad_norm 1.23422
+wandb:       train/loss 0.43259
+wandb:         train/lr 1e-05
+wandb: warmup/grad_norm 2.07635
+wandb:      warmup/loss 0.22615
+wandb:        warmup/lr 1e-05
+wandb: 
+wandb: 🚀 View run lr1e-4_w40k_m10k at: https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep/runs/z880tbbl
+wandb: ⭐️ View project at: https://wandb.ai/clarkmiyamoto-new-york-university/scsi-cryoet-mnist-three-fresh-lr-warmup-mstep
+wandb: Synced 4 W&B file(s), 164 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20261001_021202-z880tbbl/logs

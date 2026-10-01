@@ -69,6 +69,12 @@ These flags are all opt-in, and the defaults reproduce the original runs:
 - `--lr_schedule {cosine,constant,cosine_per_mstep}` and `--lr_horizon_scsi_steps K`: the
   cosine reaches `--eta_min` at EM step K and then **holds** there, unlike
   `CosineAnnealingLR`, which climbs back up past `T_max`.
+- `--student_init fresh`: after every E-step, discard the teacher and train a newly
+  initialized student from scratch, with its own AdamW at `--mstep_lr`, its own EMA, and a cosine
+  to `--eta_min` over `--mstep_n_steps_train`. The warmup likewise gets its own optimizer at
+  `--warmup_lr` (otherwise unused) with a cosine over `--warmup_n_steps_train`.
+  `--lr_schedule` / `--lr_horizon_scsi_steps` don't apply and are refused. Works with
+  `--ckpt_dir` / `--resume`. Grid: `sbatch/fresh_lr_tied_steps_grid/README.md`.
 - `--sample_with_ema`: the E-step and panels use the EMA weights, which were otherwise tracked
   but never used.
 - `--save_warmup_ckpt PATH` / `--load_warmup_ckpt PATH`: train the warm start once and share it

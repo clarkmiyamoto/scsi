@@ -17,6 +17,10 @@ class Config:
     lift: bool = False          # E-step pairs (R.x_hat, F(x_hat)), R a fresh independent SO(2)
                                 # rotation (corruption.build_pair_sample). Default off: preserves
                                 # in-flight SCSI runs. main_supervised.py defaults this on.
+    student_init: str = "teacher"  # "teacher": each M-step fine-tunes the E-step model in place.
+                                   # "fresh": each M-step trains a newly initialized model from
+                                   # scratch (own optimizer / EMA / per-M-step cosine LR); the
+                                   # warmup likewise trains on its own --warmup_* settings.
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +66,15 @@ def parse_args() -> argparse.Namespace:
     model_grp = parser.add_argument_group("model")
     model_grp.add_argument("--arch", type=str, default="dit", choices=["dit", "unet"])
     model_grp.add_argument("--patch_size", type=int, default=4, help="Only used when --arch dit.")
+    model_grp.add_argument("--student_init", type=str, default="teacher", choices=["teacher", "fresh"],
+                           help="How each M-step's student starts. 'teacher' (default): keep "
+                                "fine-tuning the E-step model in place, with one optimizer at "
+                                "--mstep_lr and one cosine LR schedule spanning warmup + all M-steps "
+                                "(the --warmup_lr / _weight_decay / _ema flags are unused). 'fresh': "
+                                "every model gets its own optimizer, EMA, and cosine schedule down to "
+                                "--eta_min -- the warmup at --warmup_lr over --warmup_n_steps_train, "
+                                "then after each E-step a newly initialized student at --mstep_lr "
+                                "over --mstep_n_steps_train.")
 
     # --- Warmup training / SCSI e-step / SCSI m-step / SCSI outer loop / viz (shared) ---
     add_scsi_args(parser, default_wandb_project="scsi-cryoet-mnist")
@@ -86,4 +99,5 @@ def config_from_args(args: argparse.Namespace) -> Config:
     warmup, scsi_config, viz = scsi_configs_from_args(args)
 
     return Config(dataset=dataset, warmup=warmup, scsi=scsi_config, viz=viz,
-                  arch=args.arch, patch_size=args.patch_size, lift=args.lift)
+                  arch=args.arch, patch_size=args.patch_size, lift=args.lift,
+                  student_init=args.student_init)

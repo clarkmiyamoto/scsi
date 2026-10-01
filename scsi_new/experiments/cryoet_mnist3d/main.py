@@ -45,11 +45,14 @@ _RESUME_KEYS = _WARMUP_CKPT_KEYS + (
     "estep_num_samples", "estep_batch_size", "estep_n_steps_sampling",
     "mstep_n_steps_train", "mstep_batch_size", "mstep_lr", "mstep_weight_decay", "mstep_ema",
     "mstep_interpolant_style", "eta_min", "lr_schedule", "lr_horizon_scsi_steps",
-    "sample_with_ema",
+    "sample_with_ema", "student_init",
 )
+# Args added after checkpoints already existed: a checkpoint without the key ran with this value.
+_ARG_DEFAULTS = {"student_init": "teacher"}
 
 
 def _check_args(ckpt_args: dict, args, keys: tuple[str, ...], path: str) -> None:
+    ckpt_args = {**_ARG_DEFAULTS, **ckpt_args}
     # argparse gives nargs values as lists and their defaults as tuples; compare as lists.
     norm = lambda v: list(v) if isinstance(v, (list, tuple)) else v
     mismatched = {k: (ckpt_args.get(k), vars(args).get(k)) for k in keys
@@ -144,18 +147,39 @@ if __name__ == "__main__":
 
     V = config.dataset.vol_size
 
+    def build_model():
+        return ConditionalVelocityCryoET3D(
+            vol_size=V,
+            num_tilts=config.dataset.num_tilts,
+            block_out_channels=config.block_out_channels,
+            layers_per_block=config.layers_per_block,
+        ).to(device)
+
+    def build_optimizer(net, train_config, n_steps):
+        # --student_init fresh: AdamW + a cosine from train_config.lr down to --eta_min over
+        # n_steps, private to this one model (make_lr_lambda's cosine with no EM steps).
+        optimizer = AdamW(net.parameters(),
+                          lr=train_config.lr,
+                          weight_decay=train_config.weight_decay)
+        scheduler = LambdaLR(optimizer, make_lr_lambda(
+            "cosine", warmup_steps=n_steps, mstep_steps=0, horizon_scsi_steps=0,
+            floor=config.scsi.lr_eta_min / train_config.lr))
+        return optimizer, scheduler
+
     # Model & optimizer
-    model = ConditionalVelocityCryoET3D(
-        vol_size=V,
-        num_tilts=config.dataset.num_tilts,
-        block_out_channels=config.block_out_channels,
-        layers_per_block=config.layers_per_block,
-    ).to(device)
+    model = build_model()
     base_dist = IsotropicGaussian(shape=(1, V, V, V), device=device)
-    optimizer = AdamW(model.parameters(),
-                      lr=config.scsi.mstep.lr,
-                      weight_decay=config.scsi.mstep.weight_decay)
-    ema = EMA(model, decay=config.scsi.mstep.ema)
+    if config.student_init == "fresh":
+        # Every model trains on its own schedule: the warmup gets --warmup_lr / _weight_decay /
+        # _ema and a cosine over just the warmup steps, so warmup and M-step settings don't leak
+        # into each other.
+        optimizer, scheduler = build_optimizer(model, config.warmup, config.warmup.n_steps_train)
+        ema = EMA(model, decay=config.warmup.ema)
+    else:
+        optimizer = AdamW(model.parameters(),
+                          lr=config.scsi.mstep.lr,
+                          weight_decay=config.scsi.mstep.weight_decay)
+        ema = EMA(model, decay=config.scsi.mstep.ema)
     # Weights the E-step samples with and the panels show. eval/ scores both regardless.
     sample_model = ema.ema_model if config.sample_with_ema else model
 
@@ -234,24 +258,29 @@ if __name__ == "__main__":
                              f"(checksum {ckpt['obs_checksum']} vs {obs_checksum})")
         model.load_state_dict(ckpt["model"])
         ema.ema_model.load_state_dict(ckpt["ema_model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        # load_state_dict restores the checkpoint run's lr (and the base lr LambdaLR scales).
-        # Replace them with this run's, so --mstep_lr / --lr_schedule apply from the first EM step.
-        # The scheduler below is rebuilt at the restored global step, not loaded: the schedule
-        # is a pure function of that step.
-        for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] = config.scsi.mstep.lr
-            group["weight_decay"] = config.scsi.mstep.weight_decay
+        # --student_init fresh: these weights only run the next E-step, and a new student with
+        # its own optimizer takes the next optimizer step, so there is no optimizer to restore.
+        if config.student_init == "teacher":
+            optimizer.load_state_dict(ckpt["optimizer"])
+            # load_state_dict restores the checkpoint run's lr (and the base lr LambdaLR scales).
+            # Replace them with this run's, so --mstep_lr / --lr_schedule apply from the first EM
+            # step. The scheduler below is rebuilt at the restored global step, not loaded: the
+            # schedule is a pure function of that step.
+            for group in optimizer.param_groups:
+                group["lr"] = group["initial_lr"] = config.scsi.mstep.lr
+                group["weight_decay"] = config.scsi.mstep.weight_decay
         global_step[0] = ckpt["global_step"]
         start_em = ckpt.get("em_step", 0)
         _set_rng_state(ckpt["rng"])
     del ckpt, resume
 
-    horizon = (config.lr_horizon_scsi_steps if config.lr_horizon_scsi_steps is not None
-               else config.scsi.num_scsi_steps)
-    scheduler = LambdaLR(optimizer, make_lr_lambda(
-        config.lr_schedule, config.warmup.n_steps_train, config.scsi.mstep.n_steps_train, horizon,
-        floor=config.scsi.lr_eta_min / config.scsi.mstep.lr, start_step=global_step[0]))
+    if config.student_init == "teacher":
+        horizon = (config.lr_horizon_scsi_steps if config.lr_horizon_scsi_steps is not None
+                   else config.scsi.num_scsi_steps)
+        scheduler = LambdaLR(optimizer, make_lr_lambda(
+            config.lr_schedule, config.warmup.n_steps_train, config.scsi.mstep.n_steps_train,
+            horizon, floor=config.scsi.lr_eta_min / config.scsi.mstep.lr,
+            start_step=global_step[0]))
 
     if not resumed and not config.load_warmup_ckpt:
         # Warm start on RESAMPLED (target, ŷ) pairs generated on the fly from the pseudoinverse
@@ -293,6 +322,16 @@ if __name__ == "__main__":
             sample_model, base_dist, observations, pair_sample, config.scsi.estep
         )
         t1 = time.time()
+
+        # --student_init fresh: the teacher's only job was the E-step above. Discard it and train
+        # a newly initialized student (new optimizer, EMA, and cosine LR restarted over this
+        # M-step) instead of fine-tuning the teacher in place.
+        if config.student_init == "fresh":
+            model = build_model()
+            optimizer, scheduler = build_optimizer(model, config.scsi.mstep,
+                                                   config.scsi.mstep.n_steps_train)
+            ema = EMA(model, decay=config.scsi.mstep.ema)
+            sample_model = ema.ema_model if config.sample_with_ema else model
 
         # M-step: update model parameters to maximize expected log-likelihood
         mstep_lifted(

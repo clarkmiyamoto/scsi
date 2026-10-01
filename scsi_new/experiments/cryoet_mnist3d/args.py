@@ -17,6 +17,10 @@ class Config:
     lift: bool = False          # E-step pairs (R.x_hat, F(x_hat)), R a fresh independent SO(3)
                                 # rotation (corruption.build_pair_sample). Default off: preserves
                                 # in-flight SCSI runs. main_supervised.py defaults this on.
+    student_init: str = "teacher"  # "teacher": each M-step fine-tunes the E-step model in place.
+                                   # "fresh": each M-step trains a newly initialized model from
+                                   # scratch (own optimizer / EMA / per-M-step cosine LR); the
+                                   # warmup likewise trains on its own --warmup_* settings.
     # LR schedule / EMA / checkpointing / eval (main.py). Defaults reproduce the original run:
     # one global cosine over warmup + all EM steps, raw weights sample, no checkpoints.
     lr_schedule: str = "cosine"                # "cosine" | "constant" | "cosine_per_mstep"
@@ -102,6 +106,16 @@ def parse_args() -> argparse.Namespace:
                            help="Per-level channel widths; #levels sets the spatial "
                                 "downsampling depth (depth axis is never downsampled).")
     model_grp.add_argument("--layers_per_block", type=int, default=2)
+    model_grp.add_argument("--student_init", type=str, default="teacher", choices=["teacher", "fresh"],
+                           help="How each M-step's student starts. 'teacher' (default): keep "
+                                "fine-tuning the E-step model in place with one optimizer at "
+                                "--mstep_lr, scheduled by --lr_schedule (the --warmup_lr / "
+                                "_weight_decay / _ema flags are unused). 'fresh': every model gets "
+                                "its own optimizer, EMA, and cosine schedule down to --eta_min -- "
+                                "the warmup at --warmup_lr over --warmup_n_steps_train, then after "
+                                "each E-step a newly initialized student at --mstep_lr over "
+                                "--mstep_n_steps_train. --lr_schedule / --lr_horizon_scsi_steps "
+                                "don't apply to 'fresh'.")
 
     # --- Warmup training / SCSI e-step / SCSI m-step / SCSI outer loop / viz (shared) ---
     add_scsi_args(parser, default_wandb_project="scsi-cryoet-mnist3d")
@@ -114,7 +128,8 @@ def parse_args() -> argparse.Namespace:
                             "warmup + --lr_horizon_scsi_steps EM steps (the original schedule). "
                             "constant: --mstep_lr throughout. cosine_per_mstep: a fresh cosine "
                             "--mstep_lr -> --eta_min over the warmup and again over every M-step. "
-                            "The warmup always trains at --mstep_lr; --warmup_lr is still unused.")
+                            "The warmup always trains at --mstep_lr; --warmup_lr is still unused. "
+                            "--student_init teacher only.")
     sched.add_argument("--lr_horizon_scsi_steps", type=int, default=None,
                        help="cosine only: the EM step at which the LR reaches --eta_min. Default "
                             "--num_scsi_steps. Smaller: the LR holds at --eta_min for the "
@@ -168,6 +183,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.resume and not args.ckpt_dir:
         parser.error("--resume needs --ckpt_dir")
+    if args.student_init == "fresh" and (args.lr_schedule != "cosine"
+                                         or args.lr_horizon_scsi_steps is not None):
+        parser.error("--lr_schedule / --lr_horizon_scsi_steps don't apply to --student_init fresh "
+                     "(every model gets its own cosine)")
     return args
 
 
@@ -194,6 +213,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
     return Config(dataset=dataset, warmup=warmup, scsi=scsi_config, viz=viz,
                   block_out_channels=tuple(args.block_out_channels),
                   layers_per_block=args.layers_per_block, lift=args.lift,
+                  student_init=args.student_init,
                   lr_schedule=args.lr_schedule,
                   lr_horizon_scsi_steps=args.lr_horizon_scsi_steps,
                   sample_with_ema=args.sample_with_ema,
