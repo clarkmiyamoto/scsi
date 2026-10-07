@@ -6,7 +6,8 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset, ConcatDataset
 from dataclasses import dataclass
 
-from corruption import corruption_channel
+from scsi_new.paths import torchvision_data_dir
+from .corruption import corruption_channel
 
 @dataclass
 class Config_Dataset_MNIST:
@@ -79,7 +80,7 @@ def load_mnist_subset(config: Config_Dataset_MNIST) -> Dataset:
     ])
 
     dataset = datasets.MNIST(
-        "./data", train=config.train, download=True, transform=transform
+        torchvision_data_dir(__file__), train=config.train, download=True, transform=transform
     )
     generator = torch.Generator().manual_seed(config.seed) if config.seed is not None else None
 

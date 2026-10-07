@@ -1,11 +1,11 @@
 import argparse
 from dataclasses import dataclass
 
-from corruption import PAIR_FRAMES
-from data import DEFAULT_CRYOBENCH_ROOT, DEFAULT_DATA_ROOT, Config_Dataset_IgG
-from model import ENCODER_CFG, UNET_CFG
-from scsi import Config_SCSI, Config_SCSI_MStep
-from scsi_args import Config_Viz, add_scsi_args, scsi_configs_from_args
+from .corruption import PAIR_FRAMES
+from .data import DEFAULT_CRYOBENCH_ROOT, DEFAULT_DATA_ROOT, Config_Dataset_IgG
+from .model import ENCODER_CFG, UNET_CFG
+from scsi_new.scsi import Config_SCSI, Config_SCSI_MStep
+from scsi_new.scsi_args import Config_Viz, add_scsi_args, scsi_configs_from_args
 
 
 @dataclass
@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
                          help="F multiplies the projection by this, which sets the units of the "
                               "volumes the model generates. Default: calibrated so the "
                               "pseudoinverse warm-start volumes have unit std "
-                              "(data.calibrate_gain). `python data.py` prints this value and a "
+                              "(data.calibrate_gain). `python -m scsi_new.experiments.cryoet_igg1d.data` prints this value and a "
                               "GT-derived one.")
 
     # --- Warm start (pseudoinverse.py) ---
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
                            "sphere of this diameter (A), like a cryo-EM mask diameter. IgG-1D "
                            "density, shift included, lies within ~100 A of the box centre. 0 "
                            "smears through the whole box (the exact pseudoinverse). "
-                           "`python pseudoinverse.py` scores values against GT.")
+                           "`python -m scsi_new.experiments.cryoet_igg1d.pseudoinverse` scores values against GT.")
 
     # --- Model (cryofm's image-conditioned UNet, vendored) ---
     model_grp = parser.add_argument_group("model")

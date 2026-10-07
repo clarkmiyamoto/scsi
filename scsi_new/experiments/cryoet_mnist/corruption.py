@@ -5,7 +5,7 @@ this file only adds the projection operator and the noise/tilt-series assembly o
 """
 
 import torch
-from rotation import sample_tilt_series_angles, sample_uniform_angle, rotate_2d
+from .rotation import sample_tilt_series_angles, sample_uniform_angle, rotate_2d
 
 
 def project_1d(x: torch.Tensor) -> torch.Tensor:

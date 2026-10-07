@@ -16,12 +16,15 @@ SCHEDS=${SCHEDS:-"cosine constant cosine_per_mstep"}
 MSTEPS=${MSTEPS:-"5000 10000"}
 N_JOBS=${N_JOBS:-2}   # 3-day jobs; see README.md for the wall-time estimate
 
-SRC=/mnt/home/cmiyamoto/scsi/scsi_new
-SNAP=/mnt/home/cmiyamoto/scsi_snapshots/igg1d_sched_warmup_mstep_$(date +%Y%m%d_%H%M%S)/scsi_new
+export REPO=${REPO:-/mnt/home/cmiyamoto/scsi}   # uv env; the snapshot below only replaces the code
+SRC=$REPO/scsi_new
+SNAP_ROOT=/mnt/home/cmiyamoto/scsi_snapshots/igg1d_sched_warmup_mstep_$(date +%Y%m%d_%H%M%S)
+SNAP=$SNAP_ROOT/scsi_new
 mkdir -p "$SNAP/experiments" /mnt/ceph/users/cmiyamoto/scsi_runs/igg1d/logs
 rsync -a --exclude __pycache__ "$SRC"/*.py "$SNAP/"
+rsync -a "$SRC/experiments/__init__.py" "$SNAP/experiments/"
 rsync -a --exclude __pycache__ --exclude wandb "$SRC/experiments/cryoet_igg1d" "$SNAP/experiments/"
-export CODE=$SNAP/experiments/cryoet_igg1d
+export CODE=$SNAP_ROOT   # run from here: python -m scsi_new.experiments.cryoet_igg1d.main
 echo "code snapshot: $CODE"
 
 for W in $WARMUPS; do

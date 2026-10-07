@@ -4,8 +4,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from corruption import corruption_channel
-from ode import euler_integration_trajectory
+from .corruption import corruption_channel
+from scsi_new.ode import euler_integration_trajectory
 
 POINT_DIM = 2  # this experiment is fixed at 2D
 

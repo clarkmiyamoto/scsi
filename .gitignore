@@ -229,3 +229,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# generated sbatch scripts (scsi_new/sbatch_gen.py; the definitions in experiments/*/sweeps.py are the source)
+generated/

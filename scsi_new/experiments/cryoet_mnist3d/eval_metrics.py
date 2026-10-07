@@ -37,8 +37,8 @@ import math
 
 import torch
 
-from ode import euler_integration
-from rotation import quaternion_to_matrix, rotate_3d, sample_uniform_rotation_so3
+from scsi_new.ode import euler_integration
+from .rotation import quaternion_to_matrix, rotate_3d, sample_uniform_rotation_so3
 
 
 def _unit(v: torch.Tensor) -> torch.Tensor:

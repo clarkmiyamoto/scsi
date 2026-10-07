@@ -49,8 +49,8 @@ O(1)-O(10) constant. `build_warmup` min-max-renormalizes each volume to the [-1,
 import torch
 import torch.nn.functional as F
 
-from corruption import corruption_channel
-from rotation import sample_tilt_series_rotations_so3
+from .corruption import corruption_channel
+from .rotation import sample_tilt_series_rotations_so3
 
 
 ########################################################
@@ -179,7 +179,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
     # Deferred (see the module-level NOTE): data.py imports `pseudoinverse` from this file.
-    from data import Config_Dataset_MNIST, load_mnist_volumes
+    from .data import Config_Dataset_MNIST, load_mnist_volumes
 
     parser = argparse.ArgumentParser(
         description="Smoke-test pseudoinverse() on KNOWN-pose tilt series")

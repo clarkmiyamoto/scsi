@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from unet3d import UNet3DModel
+from .unet3d import UNet3DModel
 
 INTEGRATION_SCALE: float = 999  # t in [0, 1] -> UNet timestep, as cryoet_mnist3d/model.py
 

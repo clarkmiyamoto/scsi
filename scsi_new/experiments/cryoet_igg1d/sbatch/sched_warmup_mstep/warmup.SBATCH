@@ -21,7 +21,8 @@ set -euo pipefail
 
 W=${1:?usage: sbatch warmup.SBATCH <warmup steps>}
 # CODE: the snapshot submit_all.sh made; the live checkout when run by hand.
-CODE=${CODE:-/mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_igg1d}
+REPO=${REPO:-/mnt/home/cmiyamoto/scsi}
+CODE=${CODE:-$REPO}
 RUNS=/mnt/ceph/users/cmiyamoto/scsi_runs/igg1d
 CKPT_ROOT=$RUNS/checkpoints/sched_warmup_mstep
 NAME=warmup_w$((W / 1000))k
@@ -34,7 +35,7 @@ cd "$CODE"
 echo "host $(hostname)  job $SLURM_JOB_ID  code $CODE  $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 
-uv run --project /mnt/home/cmiyamoto/scsi python main.py \
+uv run --project "$REPO" python -m scsi_new.experiments.cryoet_igg1d.main \
     --warmup_n_steps_train "$W" \
     --mstep_n_steps_train 5000 \
     --lr_schedule cosine \

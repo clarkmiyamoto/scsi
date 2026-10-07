@@ -33,9 +33,10 @@ from torchvision import datasets
 import torchvision.transforms as transforms
 from PIL import Image
 
-from corruption import corruption_channel
-from rotation import sample_tilt_series_rotations_so3
-from pseudoinverse import pseudoinverse
+from scsi_new.paths import torchvision_data_dir
+from .corruption import corruption_channel
+from .rotation import sample_tilt_series_rotations_so3
+from .pseudoinverse import pseudoinverse
 # pseudoinverse.py does NOT import from this file at module level (see the NOTE there) -- that's
 # what keeps this import non-circular.
 
@@ -109,7 +110,7 @@ def _load_mnist_digits(config: Config_Dataset_MNIST,
         transforms.ToTensor(),
         transforms.Normalize([0.5], [0.5]),
     ])
-    dataset = datasets.EMNIST("./data", split="digits", train=config.train, download=True,
+    dataset = datasets.EMNIST(torchvision_data_dir(__file__), split="digits", train=config.train, download=True,
                               transform=transform)
     generator = torch.Generator().manual_seed(config.seed) if config.seed is not None else None
 
@@ -333,7 +334,7 @@ if __name__ == "__main__":
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
     from skimage.measure import marching_cubes
 
-    from rotation import rotate_3d, sample_uniform_rotation_so3
+    from .rotation import rotate_3d, sample_uniform_rotation_so3
 
     parser = argparse.ArgumentParser(
         description="Interactive 3D view: GT volumes vs build_warmup reconstructions")

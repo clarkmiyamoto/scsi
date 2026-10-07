@@ -20,7 +20,8 @@
 #SBATCH --output=/mnt/ceph/users/cmiyamoto/scsi_runs/igg1d/logs/%x_%j.out
 set -euo pipefail
 
-CODE=/mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_igg1d
+REPO=${REPO:-/mnt/home/cmiyamoto/scsi}   # checkout whose pyproject.toml / uv env is used
+CODE=$REPO                                    # directory the job runs from (python -m needs the repo root)
 RUNS=/mnt/ceph/users/cmiyamoto/scsi_runs/igg1d
 NAME=em_scratch
 CKPT=$RUNS/checkpoints/$NAME
@@ -35,7 +36,7 @@ cd "$CODE"
 echo "host $(hostname)  job $SLURM_JOB_ID  $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 
-uv run --project /mnt/home/cmiyamoto/scsi python main.py \
+uv run --project "$REPO" python -m scsi_new.experiments.cryoet_igg1d.main \
     $START \
     --estep_num_samples 2000 \
     --mstep_n_steps_train 5000 \

@@ -1,18 +1,7 @@
-import sys
-from pathlib import Path
-
-# This file lives at scsi_new/experiments/cryoet_mnist3d/main.py. scsi.py, si.py, ode.py, and
-# distribution.py live flat at scsi_new/ and import each other with bare imports (e.g. scsi.py
-# does `from si import ...`), so scsi_new/ must be on sys.path for those to resolve.
-# corruption.py/data.py/args.py/model.py/wandb_logging.py need no such fix: Python already adds
-# a directly-run script's own directory to sys.path[0].
-SCSI_NEW_ROOT = Path(__file__).resolve().parents[2]
-if str(SCSI_NEW_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCSI_NEW_ROOT))
-
 import functools
 import math
 import os
+import sys
 import time
 
 import torch
@@ -21,14 +10,15 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import TensorDataset
 
-from corruption import corruption_channel, build_pair_sample  # black box forward model
-from data import build_observations, build_warmup, build_viz_pool
-from distribution import IsotropicGaussian
-from eval_metrics import AlignedCorrelation, calibrate, evaluate
-from model import ConditionalVelocityCryoET3D
-from scsi import EMA, ResampledPairs, estep, mstep_lifted
-from args import parse_args, config_from_args
-from wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
+from .corruption import corruption_channel, build_pair_sample  # black box forward model
+from .data import build_observations, build_warmup, build_viz_pool
+from scsi_new.distribution import IsotropicGaussian
+from .eval_metrics import AlignedCorrelation, calibrate, evaluate
+from .model import ConditionalVelocityCryoET3D
+from scsi_new.train_utils import atomic_save, check_args, make_lr_lambda, rng_state, set_rng_state
+from scsi_new.scsi import EMA, ResampledPairs, estep, mstep_lifted
+from .args import parse_args, config_from_args
+from .wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
 
 
 # Args that fix the observations, the warm start and the network. --load_warmup_ckpt refuses a
@@ -51,68 +41,6 @@ _RESUME_KEYS = _WARMUP_CKPT_KEYS + (
 _ARG_DEFAULTS = {"student_init": "teacher"}
 
 
-def _check_args(ckpt_args: dict, args, keys: tuple[str, ...], path: str) -> None:
-    ckpt_args = {**_ARG_DEFAULTS, **ckpt_args}
-    # argparse gives nargs values as lists and their defaults as tuples; compare as lists.
-    norm = lambda v: list(v) if isinstance(v, (list, tuple)) else v
-    mismatched = {k: (ckpt_args.get(k), vars(args).get(k)) for k in keys
-                  if norm(ckpt_args.get(k)) != norm(vars(args).get(k))}
-    if mismatched:
-        raise ValueError(f"{path} was made with different args (checkpoint, this run): "
-                         f"{mismatched}")
-
-
-def make_lr_lambda(schedule: str, warmup_steps: int, mstep_steps: int, horizon_scsi_steps: int,
-                   floor: float, start_step: int = 0):
-    """
-    LambdaLR multiplier on --mstep_lr, as a function of the scheduler's own step count i (the
-    global optimizer step is i + start_step, so a run resumed from a warmup checkpoint picks the
-    schedule up where the checkpoint left off). floor = eta_min / mstep_lr.
-
-    cosine: floor + (1 - floor) * (1 + cos(pi * g / T)) / 2 with T = warmup + horizon * mstep --
-        CosineAnnealingLR's closed form, except that g is clamped at T. CosineAnnealingLR climbs
-        back up past T_max, which would silently re-warm a run with horizon < num_scsi_steps.
-    constant: 1.
-    cosine_per_mstep: the same cosine restarted over the warmup and over every M-step.
-    """
-    def cos(frac: float) -> float:
-        return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * min(frac, 1.0)))
-
-    total = max(1, warmup_steps + horizon_scsi_steps * mstep_steps)
-
-    def lr_lambda(i: int) -> float:
-        g = i + start_step
-        if schedule == "constant":
-            return 1.0
-        if schedule == "cosine":
-            return cos(g / total)
-        if schedule == "cosine_per_mstep":
-            if g < warmup_steps:
-                return cos(g / warmup_steps)
-            return cos(((g - warmup_steps) % mstep_steps) / mstep_steps)
-        raise ValueError(f"unknown lr_schedule {schedule!r}")
-
-    return lr_lambda
-
-
-def _rng_state() -> dict:
-    return {"cpu": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
-
-
-def _set_rng_state(state: dict) -> None:
-    torch.set_rng_state(state["cpu"])
-    if state["cuda"] is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
-
-
-def _atomic_save(obj: dict, path: str) -> None:
-    # A walltime kill mid-write leaves the previous file intact instead of a truncated one.
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(obj, path + ".tmp")
-    os.replace(path + ".tmp", path)
-
-
 if __name__ == "__main__":
     args = parse_args()
     config = config_from_args(args)
@@ -126,7 +54,7 @@ if __name__ == "__main__":
         resume = torch.load(latest, map_location="cpu", weights_only=False)
         if "wandb_id" not in resume:
             raise ValueError(f"{latest} predates --resume (no wandb_id / obs_checksum)")
-        _check_args(resume["args"], args, _RESUME_KEYS, latest)
+        check_args(resume["args"], args, _RESUME_KEYS, latest, arg_defaults=_ARG_DEFAULTS)
         if resume["em_step"] >= config.scsi.num_scsi_steps:
             print(f"{latest} is already at EM step {resume['em_step']}/"
                   f"{config.scsi.num_scsi_steps}; nothing to do.", flush=True)
@@ -250,7 +178,7 @@ if __name__ == "__main__":
     if not resumed and config.load_warmup_ckpt:
         ckpt_path = config.load_warmup_ckpt
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        _check_args(ckpt["args"], args, _WARMUP_CKPT_KEYS, ckpt_path)
+        check_args(ckpt["args"], args, _WARMUP_CKPT_KEYS, ckpt_path, arg_defaults=_ARG_DEFAULTS)
     start_em = 0
     if ckpt is not None:
         if not math.isclose(ckpt["obs_checksum"], obs_checksum, rel_tol=1e-9):
@@ -271,7 +199,7 @@ if __name__ == "__main__":
                 group["weight_decay"] = config.scsi.mstep.weight_decay
         global_step[0] = ckpt["global_step"]
         start_em = ckpt.get("em_step", 0)
-        _set_rng_state(ckpt["rng"])
+        set_rng_state(ckpt["rng"])
     del ckpt, resume
 
     if config.student_init == "teacher":
@@ -301,10 +229,10 @@ if __name__ == "__main__":
         )
         del warmup_x, warmup_pairs
         if config.save_warmup_ckpt:
-            _atomic_save({
+            atomic_save({
                 "model": model.state_dict(), "ema_model": ema.ema_model.state_dict(),
                 "optimizer": optimizer.state_dict(), "global_step": global_step[0],
-                "rng": _rng_state(), "obs_checksum": obs_checksum, "args": vars(args),
+                "rng": rng_state(), "obs_checksum": obs_checksum, "args": vars(args),
             }, config.save_warmup_ckpt)
 
     # A resumed run already has its RNG state (and its em-0 panels / eval) from the first job.
@@ -345,10 +273,10 @@ if __name__ == "__main__":
             log_eval(em_step=k + 1)
 
         if config.ckpt_dir:
-            _atomic_save({
+            atomic_save({
                 "model": model.state_dict(), "ema_model": ema.ema_model.state_dict(),
                 "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-                "em_step": k + 1, "global_step": global_step[0], "rng": _rng_state(),
+                "em_step": k + 1, "global_step": global_step[0], "rng": rng_state(),
                 "obs_checksum": obs_checksum, "wandb_id": wandb.run.id, "args": vars(args),
             }, os.path.join(config.ckpt_dir, "latest.pt"))
         # Slurm-log progress line, for checking wall time against --time.

@@ -3,7 +3,7 @@
 ### August 21st
 I find the number of samples + training steps is much larger than we expect.
 ```
-uv run main.py \
+uv run python -m scsi_new.experiments.cryoet_mnist.main \
     --n_images_per_class 6000 \
     --warmup_n_steps_train 40000 \
     --mstep_n_steps_train 5000

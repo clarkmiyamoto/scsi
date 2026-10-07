@@ -1,8 +1,8 @@
 import torch
 from dataclasses import dataclass
-import ode
-import sde
-from si import Interpolant, LinearInterpolant, GVPInterpolant
+from . import ode
+from . import sde
+from .si import Interpolant, LinearInterpolant, GVPInterpolant
 
 @dataclass
 class Config_Inference:

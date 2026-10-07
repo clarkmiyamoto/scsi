@@ -9,7 +9,8 @@
 # also written to $RUNS/logs/debug_sched_*.log.
 set -euo pipefail
 
-CODE=/mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_igg1d
+REPO=${REPO:-/mnt/home/cmiyamoto/scsi}   # checkout whose pyproject.toml / uv env is used
+CODE=$REPO                                    # directory the job runs from (python -m needs the repo root)
 RUNS=/mnt/ceph/users/cmiyamoto/scsi_runs/igg1d
 EXP=debug_sched_$(date +%Y%m%d_%H%M%S)
 CKPT=$RUNS/checkpoints/$EXP
@@ -19,7 +20,7 @@ exec > >(tee -a "$RUNS/logs/$EXP.log") 2>&1
 module load python/3.13.2 uv
 export WANDB_DIR=$RUNS/wandb
 cd "$CODE"
-PY="uv run --project /mnt/home/cmiyamoto/scsi python"
+PY="uv run --project $REPO python"
 
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
@@ -34,16 +35,16 @@ COMMON="--n_observations 2000 --warmup_n_steps_train 300 --lr_horizon_scsi_steps
         --eval_n 8 --viz_n_pool 8 --viz_n_display 4 --wandb_project scsi-cryoet-igg1d-debug"
 
 echo "=== warmup only (warmup.SBATCH) ==="
-$PY main.py $COMMON --mstep_n_steps_train 5000 --lr_schedule cosine --num_scsi_steps 0 \
+$PY -m scsi_new.experiments.cryoet_igg1d.main $COMMON --mstep_n_steps_train 5000 --lr_schedule cosine --num_scsi_steps 0 \
     --save_warmup_ckpt "$CKPT/warmup.pt" --wandb_run_name "${EXP}_warmup"
 
 EM="$COMMON --load_warmup_ckpt $CKPT/warmup.pt --estep_num_samples 64 --mstep_n_steps_train 50 --resume"
 for SCHED in cosine constant cosine_per_mstep; do
     echo "=== one EM step, --lr_schedule $SCHED (em.SBATCH) ==="
-    $PY main.py $EM --lr_schedule $SCHED --num_scsi_steps 1 --ckpt_dir "$CKPT/$SCHED" \
+    $PY -m scsi_new.experiments.cryoet_igg1d.main $EM --lr_schedule $SCHED --num_scsi_steps 1 --ckpt_dir "$CKPT/$SCHED" \
         --wandb_run_name "${EXP}_$SCHED"
 done
 echo "=== restarting the cosine arm: should resume at EM step 1 and run EM 2 ==="
-$PY main.py $EM --lr_schedule cosine --num_scsi_steps 2 --ckpt_dir "$CKPT/cosine" \
+$PY -m scsi_new.experiments.cryoet_igg1d.main $EM --lr_schedule cosine --num_scsi_steps 2 --ckpt_dir "$CKPT/cosine" \
     --wandb_run_name "${EXP}_cosine"
 echo "=== debug run finished OK: $CKPT ==="

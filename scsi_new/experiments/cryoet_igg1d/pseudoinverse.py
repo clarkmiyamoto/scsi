@@ -37,12 +37,12 @@ the exact pseudoinverse of the corrected image.
 POSE-BLIND, as cryoet_mnist's warm start: no pose is used, only (y, its CTF). One view fixes the
 projection along z and says nothing about depth, so x0 is the CTF-corrected image extruded
 through a ball, a rough symmetry-breaking start for EM and not a reconstruction.
-`python pseudoinverse.py` scores it against the GT image-frame targets (GT used there only).
+`python -m scsi_new.experiments.cryoet_igg1d.pseudoinverse` scores it against the GT image-frame targets (GT used there only).
 """
 
 import torch
 
-from corruption import apply_filter, ctf_2d
+from .corruption import apply_filter, ctf_2d
 
 
 def shell_index(D: int, device=None) -> torch.Tensor:
@@ -139,9 +139,9 @@ if __name__ == "__main__":
     import argparse
     from dataclasses import replace
 
-    from corruption import project_z
-    from rotation import center_of_mass, pose_volumes, sample_uniform_rotation_so3
-    from data import (DEFAULT_CRYOBENCH_ROOT, DEFAULT_DATA_ROOT, Config_Dataset_IgG,
+    from .corruption import project_z
+    from .rotation import center_of_mass, pose_volumes, sample_uniform_rotation_so3
+    from .data import (DEFAULT_CRYOBENCH_ROOT, DEFAULT_DATA_ROOT, Config_Dataset_IgG,
                       build_observations, import_cryobench)
 
     parser = argparse.ArgumentParser(description="Score pseudoinverse() against GT targets")

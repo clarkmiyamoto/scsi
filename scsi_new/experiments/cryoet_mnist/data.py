@@ -6,9 +6,10 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset, DataLoader, Subset, TensorDataset, ConcatDataset
 from dataclasses import dataclass
 
-from corruption import corruption_channel
-from rotation import sample_tilt_series_angles
-from pseudoinverse import pseudoinverse
+from scsi_new.paths import torchvision_data_dir
+from .corruption import corruption_channel
+from .rotation import sample_tilt_series_angles
+from .pseudoinverse import pseudoinverse
 # pseudoinverse.py does NOT import from this file at module level (see its own NOTE above the
 # corruption/rotation imports there) -- that's what keeps this import from being circular.
 
@@ -91,7 +92,7 @@ def load_mnist_subset(config: Config_Dataset_MNIST) -> Dataset:
     ])
 
     dataset = datasets.MNIST(
-        "./data", train=config.train, download=True, transform=transform
+        torchvision_data_dir(__file__), train=config.train, download=True, transform=transform
     )
     generator = torch.Generator().manual_seed(config.seed) if config.seed is not None else None
 

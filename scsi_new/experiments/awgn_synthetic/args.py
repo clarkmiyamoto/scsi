@@ -1,9 +1,9 @@
 import argparse
 from dataclasses import dataclass
 
-from data import Config_Dataset_Synthetic
-from scsi import Config_SCSI, Config_SCSI_MStep
-from scsi_args import Config_Viz, add_scsi_args, scsi_configs_from_args
+from .data import Config_Dataset_Synthetic
+from scsi_new.scsi import Config_SCSI, Config_SCSI_MStep
+from scsi_new.scsi_args import Config_Viz, add_scsi_args, scsi_configs_from_args
 
 
 @dataclass

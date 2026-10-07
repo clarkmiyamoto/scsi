@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import torch
 from torch.utils.data import Dataset, TensorDataset
 
-from corruption import corruption_channel
+from .corruption import corruption_channel
 
 POINT_DIM = 2  # this experiment is fixed at 2D
 

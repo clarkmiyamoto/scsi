@@ -18,7 +18,7 @@ volume under each image's own pose, so its z-projection underlies the image -- p
 conformation label, pose and the 100 canonical volumes. With --eval_n 16 the pool is exactly the
 images cryofm's sampling eval uses (spread over the held-out set).
 
-`python data.py` checks the forward model against the real images (GT used there only).
+`python -m scsi_new.experiments.cryoet_igg1d.data` checks the forward model against the real images (GT used there only).
 """
 
 import pickle
@@ -30,11 +30,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, TensorDataset
 
-from corruption import ctf_2d, image_formation, phase_flip
-from pseudoinverse import estimate_ssnr, pseudoinverse
+from scsi_new.paths import cryobench_root, igg_data_root
+from .corruption import ctf_2d, image_formation, phase_flip
+from .pseudoinverse import estimate_ssnr, pseudoinverse
 
-DEFAULT_DATA_ROOT = "/mnt/ceph/users/cmiyamoto/IgG-1D"
-DEFAULT_CRYOBENCH_ROOT = "/mnt/home/cmiyamoto/CryoBench"
+DEFAULT_DATA_ROOT = igg_data_root()
+DEFAULT_CRYOBENCH_ROOT = cryobench_root()
 ORIG_D = 128        # released box size (px); cryobench_data.igg1d.ORIG_D
 BOX_A = 384.0       # physical box (A), unchanged by Fourier cropping
 
@@ -279,7 +280,7 @@ if __name__ == "__main__":
           f"{vol_std:.4g}): {a * vol_std:.4g}")
     pinv_gain = calibrate_gain(observations, info["ctf_pool"], config.apix, config, torch.device("cpu"))
     print(f"pseudoinverse-calibrated --vol_gain (main.py's default, --pinv_diameter_A "
-          f"{config.pinv_diameter_A}): {pinv_gain:.4g}; `python pseudoinverse.py` scores the warm start")
+          f"{config.pinv_diameter_A}): {pinv_gain:.4g}; `python -m scsi_new.experiments.cryoet_igg1d.pseudoinverse` scores the warm start")
 
     if args.save:
         import matplotlib

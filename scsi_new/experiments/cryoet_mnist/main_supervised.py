@@ -1,27 +1,15 @@
-import sys
-from pathlib import Path
-
-# This file lives at scsi_new/experiments/cryoet_mnist/main_supervised.py. scsi.py, si.py,
-# ode.py, distribution.py, and supervised.py live flat at scsi_new/ and import each other with
-# bare imports (e.g. supervised.py does `from scsi import ...`), so scsi_new/ must be on
-# sys.path. corruption.py / data.py / model.py / wandb_logging.py need no such fix: Python
-# already adds a directly-run script's own directory to sys.path[0].
-SCSI_NEW_ROOT = Path(__file__).resolve().parents[2]
-if str(SCSI_NEW_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCSI_NEW_ROOT))
-
 import argparse
 import functools
 
 import torch
 import wandb
 
-from corruption import corruption_channel, build_pair_sample  # black box forward model
-from data import Config_Dataset_MNIST, load_mnist_subset, build_viz_pool
-from distribution import IsotropicGaussian
-from model import ConditionalVelocityCryoET
-from supervised import Config_Supervised, autodetect_device, build_paired_dataset, train_supervised
-from wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
+from .corruption import corruption_channel, build_pair_sample  # black box forward model
+from .data import Config_Dataset_MNIST, load_mnist_subset, build_viz_pool
+from scsi_new.distribution import IsotropicGaussian
+from .model import ConditionalVelocityCryoET
+from scsi_new.supervised import Config_Supervised, autodetect_device, build_paired_dataset, train_supervised
+from .wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
 
 """
 Supervised baseline for experiments/cryoet_mnist -- the paired-data counterpart to main.py.

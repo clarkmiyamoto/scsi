@@ -1,16 +1,3 @@
-import sys
-from pathlib import Path
-
-# This file lives at scsi_new/experiments/cryoet_mnist/main.py. scsi.py,
-# si.py, ode.py, and distribution.py live flat at scsi_new/ and import each
-# other with bare imports (e.g. scsi.py does `from si import ...`), so
-# scsi_new/ must be on sys.path for those to resolve. corruption.py/data.py
-# need no such fix: Python already adds a directly-run script's own
-# directory to sys.path[0].
-SCSI_NEW_ROOT = Path(__file__).resolve().parents[2]
-if str(SCSI_NEW_ROOT) not in sys.path:
-    sys.path.insert(0, str(SCSI_NEW_ROOT))
-
 import functools
 
 import torch
@@ -18,13 +5,13 @@ import wandb
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from corruption import corruption_channel, build_pair_sample # black box forward model
-from data import build_observations, build_warmup, build_viz_pool
-from distribution import IsotropicGaussian
-from model import ConditionalVelocityCryoET
-from scsi import EMA, estep, mstep_lifted
-from args import parse_args, config_from_args
-from wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
+from .corruption import corruption_channel, build_pair_sample # black box forward model
+from .data import build_observations, build_warmup, build_viz_pool
+from scsi_new.distribution import IsotropicGaussian
+from .model import ConditionalVelocityCryoET
+from scsi_new.scsi import EMA, estep, mstep_lifted
+from .args import parse_args, config_from_args
+from .wandb_logging import log_reconstruction_grid, log_trajectory_grid, random_draw
 
 
 if __name__ == "__main__":

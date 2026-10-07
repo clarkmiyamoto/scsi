@@ -22,13 +22,13 @@ architecture, or visualization:
 
     # main_supervised.py, sitting next to the experiment's own main.py
     import functools
-    from corruption import corruption_channel
-    from data import load_mnist_subset, build_viz_pool          # experiment-specific
-    from model import ConditionalDiT                             # experiment-specific
-    from distribution import IsotropicGaussian
-    from scsi import basic_pair
-    from supervised import (Config_Supervised, build_paired_dataset,
-                            train_supervised, autodetect_device)
+    from .corruption import corruption_channel
+    from .data import load_mnist_subset, build_viz_pool          # experiment-specific
+    from .model import ConditionalDiT                             # experiment-specific
+    from scsi_new.distribution import IsotropicGaussian
+    from scsi_new.scsi import basic_pair
+    from scsi_new.supervised import (Config_Supervised, build_paired_dataset,
+                                     train_supervised, autodetect_device)
 
     device = autodetect_device()
     F = functools.partial(corruption_channel, noise_std=cfg.noise_std)  # bind channel params
@@ -54,8 +54,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
-from distribution import Distribution
-from scsi import Config_SCSI_MStep, EMA, ResampledPairs, mstep_lifted
+from .distribution import Distribution
+from .scsi import Config_SCSI_MStep, EMA, ResampledPairs, mstep_lifted
 
 
 def autodetect_device() -> str:

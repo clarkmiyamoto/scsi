@@ -1,5 +1,5 @@
 import torch
-from rotation import sample_tilt_series_rotations_so3, sample_uniform_rotation_so3, rotate_3d
+from .rotation import sample_tilt_series_rotations_so3, sample_uniform_rotation_so3, rotate_3d
 
 
 def project_2d(x: torch.Tensor) -> torch.Tensor:

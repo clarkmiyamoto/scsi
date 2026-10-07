@@ -25,7 +25,7 @@ checkpointing and LR schedule are `../cryoet_mnist3d/main.py`'s. The network is 
 
 - `R` is a Haar-random pose and `s` a uniform shift of ±`--shift_extent_A`.
 - `c` is a random row of the observations' CTF parameters, and `P` is the sum over z.
-- Posing uses CryoBench's `rotate_volume` convention. `python corruption.py` checks it, and `ctf_2d`
+- Posing uses CryoBench's `rotate_volume` convention. `python -m scsi_new.experiments.cryoet_igg1d.corruption` checks it, and `ctf_2d`
   against `compute_ctf`; both match exactly.
 - `--pair_frame image` (default): the M-step target is the posed volume `T_s R x̂`, i.e. the frame
   of the supervised model and of its z-broadcast image conditioning. `canonical` / `lift` are
@@ -36,7 +36,7 @@ checkpointing and LR schedule are `../cryoet_mnist3d/main.py`'s. The network is 
 `vol_gain` sets the units of the volumes the model generates. It must stay fixed for a run: it is
 saved in every checkpoint and checked on load. By default it is calibrated so the pseudoinverse
 warm-start volumes have unit std, like cryofm's `vol_std` standardisation but without GT. At
-64 px that gives **0.0131**. `python data.py` prints it next to the GT-derived value **0.0597**,
+64 px that gives **0.0131**. `python -m scsi_new.experiments.cryoet_igg1d.data` prints it next to the GT-derived value **0.0597**,
 the gain that makes GT volumes unit-std. The same check gives a matched correlation of 0.349
 against a noiseless ceiling of 0.351, with residual std 1.003, so the channel explains the real
 images.
@@ -49,7 +49,7 @@ Each observed image is pose-blind backprojected on its own:
 - smeared along z through a centred ball of `--pinv_diameter_A` (default 192 Å);
 - trained on as `ResampledPairs`, re-posed by the channel on every draw, as in cryoet_mnist3d.
 
-`python pseudoinverse.py` scores it against GT. The corrected image has r 0.70 with the GT
+`python -m scsi_new.experiments.cryoet_igg1d.pseudoinverse` scores it against GT. The corrected image has r 0.70 with the GT
 projection (the raw image 0.28). The volume has r 0.42 with its image-frame target and 0.16 with
 another image's.
 
@@ -67,8 +67,8 @@ As in mnist3d:
 steps:
 
 ```bash
-cd experiments/cryoet_igg1d
-uv run --project ~/scsi python main.py \
+cd <repo root>   # repo root; run as a module so package imports resolve
+uv run python -m scsi_new.experiments.cryoet_igg1d.main \
     --n_observations 2000 --warmup_n_steps_train 200 --estep_num_samples 64 \
     --mstep_n_steps_train 50 --num_scsi_steps 2
 ```
@@ -107,11 +107,11 @@ holds the same scores for the GT targets themselves, i.e. the ceilings.
 ## Checks
 
 ```bash
-uv run python corruption.py      # posing / CTF conventions vs CryoBench (CPU, seconds)
-uv run python data.py --save channel_check.png
+uv run python -m scsi_new.experiments.cryoet_igg1d.corruption      # posing / CTF conventions vs CryoBench (CPU, seconds)
+uv run python -m scsi_new.experiments.cryoet_igg1d.data --save channel_check.png
     # the channel vs the real images, GT used here only: matched vs mismatched correlation,
     # the sign of the scale, residual std ~1, and the GT-derived and calibrated --vol_gain
-uv run python pseudoinverse.py --save pinv.png
+uv run python -m scsi_new.experiments.cryoet_igg1d.pseudoinverse --save pinv.png
     # the warm start vs GT over a sweep of --pinv_diameter_A (a few minutes on one core)
 ```
 

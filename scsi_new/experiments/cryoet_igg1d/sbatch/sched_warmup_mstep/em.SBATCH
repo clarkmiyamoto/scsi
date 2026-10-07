@@ -32,7 +32,8 @@ case "$SCHED" in
 esac
 # CODE: the snapshot submit_all.sh made; the live checkout when run by hand. A continuation of
 # an arm should run the same code as its first job: pass the same CODE.
-CODE=${CODE:-/mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_igg1d}
+REPO=${REPO:-/mnt/home/cmiyamoto/scsi}
+CODE=${CODE:-$REPO}
 RUNS=/mnt/ceph/users/cmiyamoto/scsi_runs/igg1d
 CKPT_ROOT=$RUNS/checkpoints/sched_warmup_mstep
 WARMUP=$CKPT_ROOT/warmup_w$((W / 1000))k.pt
@@ -46,7 +47,7 @@ cd "$CODE"
 echo "host $(hostname)  job $SLURM_JOB_ID  arm $NAME  code $CODE  $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 
-uv run --project /mnt/home/cmiyamoto/scsi python main.py \
+uv run --project "$REPO" python -m scsi_new.experiments.cryoet_igg1d.main \
     --warmup_n_steps_train "$W" \
     --load_warmup_ckpt "$WARMUP" \
     --mstep_n_steps_train "$M" \

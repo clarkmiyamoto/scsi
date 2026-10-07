@@ -12,7 +12,8 @@
 # ../sched_warmup_mstep/debug.sh.
 set -euo pipefail
 
-CODE=/mnt/home/cmiyamoto/scsi/scsi_new/experiments/cryoet_igg1d
+REPO=${REPO:-/mnt/home/cmiyamoto/scsi}   # checkout whose pyproject.toml / uv env is used
+CODE=$REPO                                    # directory the job runs from (python -m needs the repo root)
 RUNS=/mnt/ceph/users/cmiyamoto/scsi_runs/igg1d
 EXP=debug_$(date +%Y%m%d_%H%M%S)
 VOL_GAIN=${VOL_GAIN:-0.0602}
@@ -22,7 +23,7 @@ exec > >(tee -a "$RUNS/logs/$EXP.log") 2>&1
 module load python/3.13.2 uv
 export WANDB_DIR=$RUNS/wandb
 cd "$CODE"
-PY="uv run --project /mnt/home/cmiyamoto/scsi python"
+PY="uv run --project $REPO python"
 
 echo "host $(hostname)  job ${SLURM_JOB_ID:-none}  $(date)"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
@@ -33,7 +34,7 @@ if [ -z "${WANDB_MODE:-}" ] && [ -z "${WANDB_API_KEY:-}" ] && ! grep -qs api.wan
     export WANDB_MODE=offline
 fi
 
-$PY corruption.py
+$PY -m scsi_new.experiments.cryoet_igg1d.corruption
 
 OPTS="--n_observations 2000 --warmup_n_steps_train 0 --vol_gain $VOL_GAIN
       --estep_num_samples 64 --mstep_n_steps_train 50
@@ -41,7 +42,7 @@ OPTS="--n_observations 2000 --warmup_n_steps_train 0 --vol_gain $VOL_GAIN
       --ckpt_dir $RUNS/checkpoints/$EXP --resume
       --wandb_project scsi-cryoet-igg1d-debug --wandb_run_name $EXP"
 
-$PY main.py $OPTS --num_scsi_steps 2
+$PY -m scsi_new.experiments.cryoet_igg1d.main $OPTS --num_scsi_steps 2
 echo "=== restarting to check --resume continues at EM 3 ==="
-$PY main.py $OPTS --num_scsi_steps 3
+$PY -m scsi_new.experiments.cryoet_igg1d.main $OPTS --num_scsi_steps 3
 echo "=== debug run finished OK: $RUNS/checkpoints/$EXP ==="

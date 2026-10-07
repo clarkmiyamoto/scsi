@@ -57,8 +57,8 @@ from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim
 
-from corruption import corruption_channel
-from rotation import sample_uniform_angle, sample_tilt_series_angles
+from .corruption import corruption_channel
+from .rotation import sample_uniform_angle, sample_tilt_series_angles
 
 # NOTE: load_mnist_subset (only needed by the __main__ CLI below) is imported locally, inside
 # __main__, instead of up here at module level. data.py imports `pseudoinverse` (below) from
@@ -307,7 +307,7 @@ if __name__ == "__main__":
 
     # Local import: see the module-level NOTE above the corruption/rotation imports -- avoids
     # a circular import with data.py, which imports `pseudoinverse` from this file.
-    from data import load_mnist_subset, Config_Dataset_MNIST
+    from .data import load_mnist_subset, Config_Dataset_MNIST
 
     print(f"Device: {device}")
     config_dataset = Config_Dataset_MNIST(

@@ -1,5 +1,5 @@
 import torch
-from si import Interpolant
+from .si import Interpolant
 
 class SDE:
 

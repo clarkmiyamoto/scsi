@@ -4,9 +4,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from corruption import corruption_channel
-from rotation import sample_tilt_series_angles
-from ode import euler_integration, euler_integration_trajectory
+from .corruption import corruption_channel
+from .rotation import sample_tilt_series_angles
+from scsi_new.ode import euler_integration, euler_integration_trajectory
 
 
 def _pair_scale(a: torch.Tensor, b: torch.Tensor) -> tuple[float, float]:

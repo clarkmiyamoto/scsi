@@ -24,8 +24,8 @@ Nothing here touches the global RNG: x0 is fixed in the pool and scoring is dete
 
 import torch
 
-from ode import euler_integration
-from rotation import mirror_z, pose_volumes
+from scsi_new.ode import euler_integration
+from .rotation import mirror_z, pose_volumes
 
 
 def _unit(v: torch.Tensor) -> torch.Tensor:

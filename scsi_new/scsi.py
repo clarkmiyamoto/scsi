@@ -6,9 +6,9 @@ import wandb
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import Dataset, DataLoader, TensorDataset
-from si import loss_ConditionalDrift, load_interpolant
-from ode import euler_integration
-from distribution import Distribution
+from .si import loss_ConditionalDrift, load_interpolant
+from .ode import euler_integration
+from .distribution import Distribution
 from dataclasses import dataclass, field
 
 """

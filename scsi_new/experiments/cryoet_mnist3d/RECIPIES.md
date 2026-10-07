@@ -7,8 +7,8 @@ an EM loop over a `diffusers` `UNet3DConditionModel` velocity field.
 ## Starting point
 
 ```bash
-cd experiments/cryoet_mnist3d
-uv run python main.py \
+cd <repo root>   # repo root; run as a module so package imports resolve
+uv run python -m scsi_new.experiments.cryoet_mnist3d.main \
     --n_images_per_class 500 \
     --num_tilts 16 \
     --warmup_n_steps_train 10000 \
@@ -104,12 +104,12 @@ extra flag.
 ## Quick data / geometry check
 
 ```bash
-uv run python data.py --n_images_per_class 2 --num_tilts 16   # interactive 3D window: GT vs
+uv run python -m scsi_new.experiments.cryoet_mnist3d.data --n_images_per_class 2 --num_tilts 16   # interactive 3D window: GT vs
                                                              #  build_warmup recon (rotatable,
                                                              #  linked isosurfaces) + SO(3) mass check
                                                              #  --level tunes the isosurface; --save
                                                              #  PATH / --no_show for headless
-uv run python data.py --n_images_per_class 2 --digit_scale 1.4   # same viewer at a wider digit;
+uv run python -m scsi_new.experiments.cryoet_mnist3d.data --n_images_per_class 2 --digit_scale 1.4   # same viewer at a wider digit;
                                                              #  read the printed mass-check % first
-uv run python pseudoinverse.py --n_images_per_class 2         # known-pose WBP smoke test + Pearson r
+uv run python -m scsi_new.experiments.cryoet_mnist3d.pseudoinverse --n_images_per_class 2         # known-pose WBP smoke test + Pearson r
 ```

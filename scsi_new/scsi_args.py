@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
-from scsi import Config_SCSI, Config_SCSI_EStep, Config_SCSI_MStep
+from .scsi import Config_SCSI, Config_SCSI_EStep, Config_SCSI_MStep
 
 """
 Shared argparse groups + config builders for the part of the CLI that's identical across every
@@ -11,9 +11,7 @@ experiments/<name>/args.py: warmup training, SCSI e-step, SCSI m-step, SCSI oute
 visualization/wandb. Each experiment's own args.py still owns its dataset, corruption-channel,
 and model argument groups -- those vary per experiment and stay local.
 
-Named scsi_args.py, not args.py, on purpose: main.py inserts scsi_new/ at sys.path[0], AHEAD of
-the script's own directory (see the comment at the top of main.py), so a root-level args.py
-would shadow each experiment's local args.py instead of living alongside it.
+Named scsi_args.py rather than args.py so it is not confused with each experiment's own args.py.
 """
 
 

@@ -18,8 +18,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from corruption import image_formation
-from ode import euler_integration, euler_integration_trajectory
+from .corruption import image_formation
+from scsi_new.ode import euler_integration, euler_integration_trajectory
 
 # Per-item entries of an eval pool (data.build_eval_pool); gt_volumes is shared.
 ITEM_KEYS = ("x_gt", "y", "x0", "ctf", "label", "rot", "shift")

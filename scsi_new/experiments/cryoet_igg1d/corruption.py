@@ -21,7 +21,7 @@ source image's shift on top of a fresh one.
 
 import torch
 
-from rotation import center_of_mass, pose_volumes, sample_uniform_rotation_so3
+from .rotation import center_of_mass, pose_volumes, sample_uniform_rotation_so3
 
 PAIR_FRAMES = ("image", "canonical", "lift")
 
@@ -133,8 +133,8 @@ if __name__ == "__main__":
     # ctf_2d against compute_ctf, recentring, and mirror_z's projection invariance.
     import argparse
 
-    from data import DEFAULT_CRYOBENCH_ROOT, import_cryobench
-    from rotation import mirror_z
+    from .data import DEFAULT_CRYOBENCH_ROOT, import_cryobench
+    from .rotation import mirror_z
 
     parser = argparse.ArgumentParser(description="Check the channel's conventions against CryoBench")
     parser.add_argument("--cryobench_root", default=DEFAULT_CRYOBENCH_ROOT)
